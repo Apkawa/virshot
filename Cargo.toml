@@ -1,0 +1,14 @@
+[package]
+name = "vibe-shot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gilrs = { version = "0.11.2", default-features = false, features = ["xinput"] }
+xcap = "0.9.8"
+chrono = "0.4.45"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+strip = true
