@@ -33,7 +33,7 @@ cargo test --no-run --target x86_64-pc-windows-gnu    # windows: compile tests (
 ```
 
 The Windows release exe lands in
-`target/x86_64-pc-windows-gnu/release/vibe-shot.exe` (~0.84 MB, `opt-level="z"`,
+`target/x86_64-pc-windows-gnu/release/virshot.exe` (~0.84 MB, `opt-level="z"`,
 `lto="thin"`, `strip=true`).
 
 ## Sandbox note

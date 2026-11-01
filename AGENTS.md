@@ -1,4 +1,4 @@
-# vibe-shot — project conventions
+# VIRShot (package `virshot`) — project conventions
 
 Ultra-lightweight gamepad screenshot utility for Windows (cross-built from Linux/WSL).
 Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
@@ -28,7 +28,7 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   Unit tests cover pure logic only: filename templates, sanitization, config
   parsing/defaults, path validation. No real gamepad, no real screen capture.
 - **E2E tests: no TDD.** They fix already-implemented functionality as regression
-  tests: run the built binary headless (`vibeshot shot`), assert a real file is
+  tests: run the built binary headless (`virshot shot`), assert a real file is
   written and valid. Place them in `tests/`. Do not design E2E up front; record
   functionality once it ships.
 - All tests must pass on both targets: `cargo test` (linux) and

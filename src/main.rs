@@ -1,4 +1,4 @@
-//! vibe-shot POC — gamepad polling stage.
+//! virshot POC — gamepad polling stage.
 //! Helpers hold pure formatting/path logic; `events` holds pure event formatting;
 //! `take_screenshot` (Stage 4) captures the primary monitor via xcap and is
 //! driven by `on_button_pressed` on a background thread.
