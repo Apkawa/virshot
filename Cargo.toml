@@ -7,6 +7,18 @@ edition = "2024"
 gilrs = { version = "0.11.2", default-features = false, features = ["xinput"] }
 xcap = "0.9.8"
 chrono = "0.4.45"
+thiserror = "2"
+eframe = "0.37.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+clap = { version = "4.6.7", features = ["derive"] }
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
+egui = "0.37.0"
+
+[dev-dependencies]
+rusty-hook = "^0.11.2"
 
 [profile.release]
 opt-level = "z"

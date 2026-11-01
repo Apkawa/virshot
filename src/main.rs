@@ -33,7 +33,10 @@ mod events {
         #[test]
         fn format_press_includes_gamepad_name_and_button() {
             let line = format_press("Xbox 360 controller", &gilrs::Button::South);
-            assert!(line.contains("Xbox 360 controller"), "gamepad name missing: {line}");
+            assert!(
+                line.contains("Xbox 360 controller"),
+                "gamepad name missing: {line}"
+            );
             assert!(line.contains("South"), "button name missing: {line}");
             assert!(line.ends_with("pressed"), "must end with 'pressed': {line}");
             assert_eq!(line, "Xbox 360 controller: South pressed");
@@ -90,7 +93,9 @@ fn take_screenshot(dir: &std::path::Path) -> Result<std::path::PathBuf, String> 
         .or_else(|| monitors.first())
         .ok_or_else(|| "no monitors found".to_owned())?;
 
-    let image = monitor.capture_image().map_err(|err| format!("capture image: {err}"))?;
+    let image = monitor
+        .capture_image()
+        .map_err(|err| format!("capture image: {err}"))?;
 
     let path = dir.join(helpers::screenshot_filename(chrono::Local::now()));
     if let Err(err) = image.save(&path) {
@@ -206,6 +211,9 @@ mod tests {
 
     #[test]
     fn screenshots_dir_is_tmp_screenshots() {
-        assert_eq!(screenshots_dir(), std::path::PathBuf::from(".tmp/screenshots"));
+        assert_eq!(
+            screenshots_dir(),
+            std::path::PathBuf::from(".tmp/screenshots")
+        );
     }
 }

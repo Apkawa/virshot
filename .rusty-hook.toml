@@ -1,0 +1,5 @@
+[hooks]
+pre-commit = "./cargo.sh check && ./cargo.sh test && ./cargo.sh fmt && git add -u . && ./cargo.sh clippy -- -D warnings"
+
+[logging]
+verbose = true
