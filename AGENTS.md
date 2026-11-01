@@ -78,6 +78,14 @@ MinGW-w64 only; the Linux `xcap` chain needs `libudev-dev`, `libwayland-dev`,
   that is not in the list above — a new crate, a new system/native package, or a
   new toolchain target — must be proposed with rationale and approved by the
   user before it is added or installed.
+- **Crate API knowledge** (research stage, and mid-implementation when an API is
+  not obvious): `./scripts/cratedoc.sh <crate>::<item>` renders the locked
+  version's docs to markdown with actionable links — item links become
+  `./scripts/cratedoc.sh` calls, `Source` links point into
+  `.cache/cargo/registry/src/...:<lines>` (rustdoc JSON needs nightly; docs.rs
+  serves no markdown); `./cargo.sh doc -p <crate>` for the full page set; crate
+  README via crates.io API `content` or GitHub raw. Verify by building — not by
+  memory.
 
 ## Best practices
 
