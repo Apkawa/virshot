@@ -1,0 +1,9 @@
+[package]
+name = "hidpad-poc"
+version = "0.1.0"
+edition = "2024"
+
+# No dependencies: the GameInput mode is a hand-written COM vtable shim over the
+# `gameinput.dll` exports (`LoadLibraryW` / `GetProcAddress` from the Windows
+# ABI), and the layout tests are std-only. `vendor/GameInput.h` is the ABI
+# authority; see `vendor/NOTICE.md` for its provenance.
