@@ -23,9 +23,10 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   `cargo fmt` (rewrites files) and `cargo fmt --check`. Run it before committing
   and at task/stage boundaries, not on every iteration.
 - **Git hooks run the pre-commit gate:**
-  `cargo check && cargo test && cargo fmt && git add -u . && cargo clippy -- -D warnings`
-  (wired via `rusty-hook`; the chain must pass before a commit lands). Formatting is
-  applied at commit time, so day-to-day iteration only needs `./scripts/check.sh`.
+  `./scripts/check.sh && ./cargo.sh fmt && git add -u . && ./cargo.sh fmt --check`
+  (wired via `rusty-hook` in `.rusty-hook.toml`; the chain must pass before a commit
+  lands). Formatting happens at commit time only: day-to-day iteration uses
+  `./scripts/check.sh`, so files do not churn between edit batches.
 - **Git hooks live in tracked `.githooks/`** (`git config core.hooksPath .githooks`).
   `rusty-hook`'s dev-dependency build script regenerates `.git/hooks/*` on every cargo
   build, and its auto-install writes to the read-only global `~/.cargo`; the `.githooks`
@@ -43,8 +44,8 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   tests: run the built binary headless (`virshot shot`), assert a real file is
   written and valid. Place them in `tests/`. Do not design E2E up front; record
   functionality once it ships.
-- All tests must pass on both targets: `cargo test` (linux) and
-  `cargo test --no-run --target x86_64-pc-windows-gnu` (windows-gnu compiles;
+- All tests must pass on both targets: `./scripts/check.sh` (linux; its `test` step) and
+  `./cargo.sh test --no-run --target x86_64-pc-windows-gnu` (windows-gnu compiles;
   execution of Windows test binaries happens on Windows hosts).
 
 ## Safety
