@@ -16,9 +16,16 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
 - **Do not hand-format code.** Formatting is `cargo fmt`'s job; run it instead of
   adjusting whitespace by hand (running it is not strictly mandatory, but any
   formatting drift belongs to `cargo fmt`, not to the author).
+- **Iteration gate:** `./scripts/check.sh` — `check + test + clippy -D warnings`,
+  no formatting. Run it after each batch of edits; do not run `cargo fmt` after
+  every edit.
+- **Formatting-aware gate:** `./scripts/check_full.sh` — `check.sh`, then
+  `cargo fmt` (rewrites files) and `cargo fmt --check`. Run it before committing
+  and at task/stage boundaries, not on every iteration.
 - **Git hooks run the pre-commit gate:**
   `cargo check && cargo test && cargo fmt && git add -u . && cargo clippy -- -D warnings`
-  (wired via `rusty-hook`; the chain must pass before a commit lands).
+  (wired via `rusty-hook`; the chain must pass before a commit lands). Formatting is
+  applied at commit time, so day-to-day iteration only needs `./scripts/check.sh`.
 - **Git hooks live in tracked `.githooks/`** (`git config core.hooksPath .githooks`).
   `rusty-hook`'s dev-dependency build script regenerates `.git/hooks/*` on every cargo
   build, and its auto-install writes to the read-only global `~/.cargo`; the `.githooks`

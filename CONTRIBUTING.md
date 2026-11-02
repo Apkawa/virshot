@@ -29,6 +29,8 @@ sudo apt install -y mingw-w64
 cargo test                                            # linux: build + unit tests
 cargo build --release --target x86_64-pc-windows-gnu  # windows release exe
 cargo test --no-run --target x86_64-pc-windows-gnu    # windows: compile tests (run on Windows)
+./scripts/check.sh                                    # gate: check + test + clippy, no formatting
+./scripts/check_full.sh                               # gate above + cargo fmt + fmt --check
 ./scripts/cratedoc.sh xcap::Monitor                   # crate API docs as markdown
 ```
 
