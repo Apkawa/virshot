@@ -19,6 +19,11 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
 - **Git hooks run the pre-commit gate:**
   `cargo check && cargo test && cargo fmt && git add -u . && cargo clippy -- -D warnings`
   (wired via `rusty-hook`; the chain must pass before a commit lands).
+- **Git hooks live in tracked `.githooks/`** (`git config core.hooksPath .githooks`).
+  `rusty-hook`'s dev-dependency build script regenerates `.git/hooks/*` on every cargo
+  build, and its auto-install writes to the read-only global `~/.cargo`; the `.githooks`
+  copy exports `CARGO_HOME=./.cache/cargo` and puts `.cache/cargo/bin` (rusty-hook CLI)
+  on PATH. Run `git config core.hooksPath .githooks` once per clone.
 - **Commit messages follow Conventional Commits** (`type(scope): description`,
   e.g. `feat(poc): ...`). No linter enforces this yet — keep it by convention.
 
@@ -108,8 +113,3 @@ MinGW-w64 only; the Linux `xcap` chain needs `libudev-dev`, `libwayland-dev`,
 
 - MVP scope is defined in `docs/spec.md`; anything not listed there is out of scope
   until explicitly added by the user.
-- **Git hooks live in tracked `.githooks/`** (`git config core.hooksPath .githooks`).
-  `rusty-hook`'s dev-dependency build script regenerates `.git/hooks/*` on every cargo
-  build, and its auto-install writes to the read-only global `~/.cargo`; the `.githooks`
-  copy exports `CARGO_HOME=./.cache/cargo` and puts `.cache/cargo/bin` (rusty-hook CLI)
-  on PATH. Run `git config core.hooksPath .githooks` once per clone.
