@@ -27,11 +27,6 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   (wired via `rusty-hook` in `.rusty-hook.toml`; the chain must pass before a commit
   lands). Formatting happens at commit time only: day-to-day iteration uses
   `./scripts/check.sh`, so files do not churn between edit batches.
-- **Git hooks live in tracked `.githooks/`** (`git config core.hooksPath .githooks`).
-  `rusty-hook`'s dev-dependency build script regenerates `.git/hooks/*` on every cargo
-  build, and its auto-install writes to the read-only global `~/.cargo`; the `.githooks`
-  copy exports `CARGO_HOME=./.cache/cargo` and puts `.cache/cargo/bin` (rusty-hook CLI)
-  on PATH. Run `git config core.hooksPath .githooks` once per clone.
 - **Commit messages follow Conventional Commits** (`type(scope): description`,
   e.g. `feat(poc): ...`). No linter enforces this yet — keep it by convention.
 
