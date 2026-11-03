@@ -56,6 +56,8 @@
 
 #![forbid(unsafe_code)]
 
+#![windows_subsystem = "windows"]
+
 mod bindings;
 mod capture;
 mod config;
