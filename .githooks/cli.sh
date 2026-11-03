@@ -2,10 +2,6 @@
 # rusty-hook
 # version 0.11.2
 
-_repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-export CARGO_HOME="$_repo_root/.cache/cargo"
-export PATH="$_repo_root/.cache/cargo/bin:$PATH"
-
 minimumMajorCliVersion=0
 minimumMinorCliVersion=11
 minimumPatchCliVersion=0

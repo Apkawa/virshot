@@ -1,219 +1,445 @@
-//! virshot POC — gamepad polling stage.
-//! Helpers hold pure formatting/path logic; `events` holds pure event formatting;
-//! `take_screenshot` (Stage 4) captures the primary monitor via xcap and is
-//! driven by `on_button_pressed` on a background thread.
+//! virshot — MVP wiring stage. `main.rs` only wires things together: CLI
+//! parsing (spec §8) and startup wiring; business rules stay in the modules.
+//! `capture` holds the capture/save pipeline (foreground target, png/jpg/webp
+//! encoding, collision-free template paths): the CLI runs `run_capture`
+//! synchronously for headless `shot`, the hotkey wiring (Stage 6) will use
+//! `spawn_capture` (save on a separate thread — spec §4.2); `config` holds the
+//! settings schema, the OS-convention config file path, and first-run
+//! auto-creation of the default config; `logging` holds level parsing,
+//! log-file placement, and global subscriber init; `template` holds
+//! filename-template rendering, sanitization, validation, and collision
+//! variants (pure logic — consumed by `capture`); `bindings` turns the config
+//! `controls` into typed capture actions with crate hotkey combos plus the
+//! debounce gate (pure logic); `hotkeys` owns the `global-hotkey` manager, the
+//! registration status report, and the input-thread event loop that dispatches
+//! debounced triggers into `spawn_capture` (spec §6 Input Thread). Gamepad
+//! input is deferred
+//! out of MVP (user decision 2026-11-02, spec v4): the future integration is
+//! an own polling loop over HID via `gameinput.dll` on Windows + `gilrs` on
+//! Linux (plan Stage 7 — DEFERRED). The MVP trigger is the global keyboard
+//! hotkey, wired in Stage 6. Bare `virshot` is the resident app (Stage 8):
+//! loads config, registers hotkeys via `hotkeys::HotkeysController` (manager
+//! on the MAIN thread — Windows WM_HOTKEY thread affinity), opens the eframe
+//! settings window on the MAIN thread (`gui`); the window X button hides the
+//! window and keeps the process resident (cancel-close + hide), so the
+//! hotkeys stay live. The `overlay` toast (Stage 9) shares one mailbox with
+//! the capture threads and is painted by `gui` in a click-through, transparent
+//! viewport. Tray (Stage 10, spec §4.5): attempted BEFORE the GUI via
+//! `tray::TrayController` so it exists even when the GUI cannot open; a tray
+//! failure is a typed ERROR log and the app keeps running without a tray.
+//! While the GUI runs, `gui::logic` maps tray actions (left click/Settings →
+//! re-show the hidden window; Take screenshot → full-screen capture; Exit →
+//! real shutdown, the only exit path). If the GUI cannot open, the main
+//! thread parks on an idle sleep tick that still polls the tray: Exit sets
+//! the shutdown flag and the park loop returns (exit 0); a GUI-failure
+//! fallback keeps the process resident rather than exiting (spec §5). The
+//! single-instance guard (Stage 11, spec §1) is taken right after the config
+//! load and held for the whole resident lifetime, so a second `virshot` on the
+//! same config exits with a typed ERROR (exit 1) before any tray, hotkey, or
+//! window exists, and the lock is freed by `Drop` on a clean exit. Headless
+//! `shot` is deliberately NOT guarded: it is a one-shot CLI tool for
+//! tests/scripts (spec §8), so scripted captures keep working while the
+//! resident app runs.
+//!
+//! CLI contract (spec §8): global flags `--config`, `--log`,
+//! `--log-level=DEBUG|INFO|ERROR` (default INFO), `--version`, `--help`;
+//! headless subcommand `virshot shot [--window] [--out <path>]
+//! [--format png|jpg|webp]` — no GUI/tray/overlay; the config file is the
+//! source of defaults; `--out`/`--format` override it; the saved full path
+//! goes to stdout; exit 0 = success, exit 1 = capture/save error. Unknown
+//! flags and invalid `--format`/`--log-level` values are clap usage errors
+//! (clap's own exit code 2) — the 0/1 contract covers shot outcomes only.
+//!
+//! Logging: default `virshot.log` next to the config file, `--log` overrides
+//! it, `--log-level` default INFO, no rotation. The flag owns the level: the
+//! `VIRSHOT_LOG_LEVEL` env override from Stage 1 is gone.
 
-mod helpers {
-    use chrono::{DateTime, Local};
-    use std::path::PathBuf;
+#![forbid(unsafe_code)]
 
-    /// Repo convention: temporary artifacts live in ./.tmp (git-ignored).
-    /// Returned as the repo-root-relative path `./.tmp/screenshots`.
-    pub fn screenshots_dir() -> PathBuf {
-        PathBuf::from(".tmp/screenshots")
-    }
+mod bindings;
+mod capture;
+mod config;
+mod gui;
+mod hotkeys;
+mod instance;
+mod logging;
+mod overlay;
+mod template;
+mod tray;
 
-    /// Timestamped screenshot filename, e.g. `screenshot_20261101_123456.png`.
-    pub fn screenshot_filename(now: DateTime<Local>) -> String {
-        now.format("screenshot_%Y%m%d_%H%M%S.png").to_string()
-    }
+use chrono::Local;
+use clap::Parser;
+use clap::Subcommand;
+use clap::ValueEnum;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+use crate::capture::CaptureCommand;
+use crate::capture::CaptureMode;
+use crate::config::Format;
+use crate::config::General;
+use crate::config::Settings;
+use crate::logging::Level;
+
+/// Idle tick for the resident app loop: idle CPU stays far under the §5 budget.
+const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Set by the tray `Exit` action when the process runs WITHOUT a GUI (the
+/// GUI-failure park loop): the loop checks it each tick and returns, so the
+/// process exits 0. With the GUI running, the same tray action goes through
+/// the eframe close flow (`gui::SettingsApp::exit_requested`) instead; this
+/// flag is the park-loop half of the tray Exit contract (spec §4.5).
+static RESIDENT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Grace the async log writer thread gets before a run that exits right after
+/// logging (`logging` has no shutdown hook): headless `run_shot` and the
+/// resident guard-failure exit.
+const LOG_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// CLI surface (spec §8). The global options are accepted before or after the
+/// subcommand.
+#[derive(Parser)]
+#[command(version, about = "Ultra-lightweight gamepad screenshot utility")]
+struct Cli {
+    /// Config file; defaults to the OS-convention `<config dir>/virshot/config.toml`.
+    #[arg(long, global = true, default_value_os_t = config::default_config_path())]
+    config: PathBuf,
+
+    /// Log file; defaults to `virshot.log` next to `--config`.
+    #[arg(long, global = true)]
+    log: Option<PathBuf>,
+
+    /// Verbosity, default `logging::default_level()` (INFO). Parsed by
+    /// `logging::parse_level` (case insensitive); any other value is a clap
+    /// usage error (exit 2).
+    #[arg(long, global = true, value_parser = logging::parse_level)]
+    log_level: Option<Level>,
+
+    /// Absent = resident app (bare `virshot`); `shot` = headless capture.
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-mod events {
-    /// Formats a button-press line: `<gamepad name>: <button> pressed`.
-    /// Pure, so it is unit-testable without a real gamepad.
-    pub fn format_press(gamepad_name: &str, button: &gilrs::Button) -> String {
-        format!("{gamepad_name}: {button:?} pressed")
-    }
+/// Subcommands (spec §8). Only `shot` exists in the MVP CLI.
+#[derive(Subcommand)]
+enum Command {
+    /// Headless single capture: prints the saved path to stdout; exit 0 on
+    /// success, 1 on error; no GUI/tray/overlay.
+    Shot {
+        /// Capture the foreground window instead of the full screen.
+        #[arg(long)]
+        window: bool,
 
-    #[cfg(test)]
-    mod tests {
-        use super::format_press;
+        /// Exact output file path; overrides the template-produced path.
+        #[arg(long)]
+        out: Option<PathBuf>,
 
-        #[test]
-        fn format_press_includes_gamepad_name_and_button() {
-            let line = format_press("Xbox 360 controller", &gilrs::Button::South);
-            assert!(
-                line.contains("Xbox 360 controller"),
-                "gamepad name missing: {line}"
-            );
-            assert!(line.contains("South"), "button name missing: {line}");
-            assert!(line.ends_with("pressed"), "must end with 'pressed': {line}");
-            assert_eq!(line, "Xbox 360 controller: South pressed");
+        /// Image format; overrides `general.format` from the config.
+        #[arg(long, value_enum)]
+        format: Option<CliFormat>,
+    },
+}
+
+/// `--format` values (spec §8: `png|jpg|webp`); mapped onto `config::Format`.
+#[derive(ValueEnum, Clone, Copy)]
+enum CliFormat {
+    Png,
+    Jpg,
+    Webp,
+}
+
+impl CliFormat {
+    fn to_format(self) -> Format {
+        match self {
+            CliFormat::Png => Format::Png,
+            CliFormat::Jpg => Format::Jpeg,
+            CliFormat::Webp => Format::Webp,
         }
+    }
+}
 
-        #[test]
-        fn format_press_handles_other_buttons() {
-            let line = format_press("DualShock 4", &gilrs::Button::North);
-            assert!(line.contains("DualShock 4"), "gamepad name missing: {line}");
-            assert!(line.contains("North"), "button name missing: {line}");
-            assert_eq!(line, "DualShock 4: North pressed");
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let config_path = cli.config;
+    let level = cli.log_level.unwrap_or_else(logging::default_level);
+    let log_path = cli
+        .log
+        .unwrap_or_else(|| logging::default_log_path(&config_path));
+    // The default log is a sibling of the config file, whose directory only
+    // appears on first run (`config::load_or_create` creates it). Logging is
+    // initialised before the config load so the config module can log through
+    // the subscriber — hence the log directory is created up front, best-effort.
+    prepare_log_dir(&log_path);
+    if let Err(err) = logging::init_logging(&log_path, level) {
+        // Startup init is the allowed console-print exception: if logging
+        // itself is unavailable there is no subscriber to report through.
+        eprintln!("Logging unavailable: {err}");
+    }
+    tracing::info!("virshot starting; logging to {}", log_path.display());
+
+    match cli.command {
+        Some(Command::Shot {
+            window,
+            out,
+            format,
+        }) => run_shot(&config_path, window, out, format),
+        None => run_resident(&config_path),
+    }
+}
+
+/// Best-effort creation of the log file's parent directory; `init_logging`
+/// still reports any I/O failure it hits afterwards (startup init must not
+/// fail on this step).
+fn prepare_log_dir(log_path: &Path) {
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+}
+
+/// Headless single capture (spec §8): load settings from `config_path`
+/// (first run auto-creates the defaults — the config is the default source),
+/// apply the flag overrides, run `capture::run_capture` synchronously on the
+/// main thread (no GUI/tray/overlay, no save thread — the CLI must print the
+/// path before exiting), then map the outcome per the contract: success
+/// prints the saved full path to stdout and exits 0; failure prints the typed
+/// error to stderr and exits 1.
+fn run_shot(
+    config_path: &Path,
+    window: bool,
+    out: Option<PathBuf>,
+    format: Option<CliFormat>,
+) -> ExitCode {
+    let settings = config::load_or_create(config_path);
+    let Settings {
+        mut general,
+        controls,
+        overlay,
+    } = settings;
+    if let Some(format) = format {
+        general.format = format.to_format();
+    }
+    if let Some(out_path) = &out
+        && !apply_out_override(&mut general, out_path)
+    {
+        return ExitCode::FAILURE;
+    }
+
+    let mode = if window {
+        CaptureMode::Window
+    } else {
+        CaptureMode::FullScreen
+    };
+    let command = CaptureCommand {
+        mode,
+        settings: Settings {
+            general,
+            controls,
+            overlay,
+        },
+        // Headless one-shot: nobody polls this mailbox — capture still runs and
+        // the CLI contract (stdout path / stderr error + exit code) is unchanged.
+        toast: overlay::new_mailbox(),
+    };
+
+    let outcome = capture::run_capture(command, Local::now());
+    let code = match outcome {
+        Ok(path) => {
+            tracing::info!("Saved: {}", path.display());
+            println!("{}", path.display());
+            ExitCode::SUCCESS
         }
-
-        #[test]
-        fn format_press_handles_unknown_button() {
-            let line = format_press("Generic pad", &gilrs::Button::Unknown);
-            assert!(line.contains("Generic pad"), "gamepad name missing: {line}");
-            assert!(line.contains("Unknown"), "button name missing: {line}");
-        }
-
-        #[test]
-        fn format_press_single_space_and_colon_layout() {
-            let line = format_press("Pad", &gilrs::Button::Start);
-            assert_eq!(line, "Pad: Start pressed");
-        }
-    }
-}
-
-/// Stage 4 hook: screenshot capture. Spawned on a background thread so the
-/// polling loop is never blocked. The thread owns only the output directory —
-/// no Gilrs references, nothing id-dependent — so it cannot race the loop.
-/// POC: no debounce, no filename collision handling (same second overwrites).
-fn on_button_pressed(_id: gilrs::GamepadId) {
-    let dir = helpers::screenshots_dir();
-    std::thread::spawn(move || match take_screenshot(&dir) {
-        Ok(path) => println!("Saved: {}", path.display()),
-        Err(err) => eprintln!("Screenshot failed: {err}"),
-    });
-}
-
-/// Capture the primary monitor (index 0 fallback when `is_primary()` errors or
-/// is unavailable) and save a timestamped PNG into `dir`. Every failure —
-/// empty monitor list, capture error, save error — comes back as `Err(String)`
-/// so callers print an error line instead of panicking.
-fn take_screenshot(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    if let Err(err) = std::fs::create_dir_all(dir) {
-        return Err(format!("create dir {}: {err}", dir.display()));
-    }
-
-    let monitors = xcap::Monitor::all().map_err(|err| format!("list monitors: {err}"))?;
-    let monitor = monitors
-        .iter()
-        .find(|monitor| monitor.is_primary().unwrap_or(false))
-        .or_else(|| monitors.first())
-        .ok_or_else(|| "no monitors found".to_owned())?;
-
-    let image = monitor
-        .capture_image()
-        .map_err(|err| format!("capture image: {err}"))?;
-
-    let path = dir.join(helpers::screenshot_filename(chrono::Local::now()));
-    if let Err(err) = image.save(&path) {
-        return Err(format!("save {}: {err}", path.display()));
-    }
-    Ok(path)
-}
-
-/// Gamepad name by id, never panicking: `Gilrs::gamepad()` unwraps internally,
-/// so prefer the connected handle and fall back to the id itself.
-fn gamepad_name(gilrs: &gilrs::Gilrs, id: gilrs::GamepadId) -> String {
-    match gilrs.connected_gamepad(id) {
-        Some(pad) => pad.name().to_owned(),
-        None => format!("gamepad {:?}", id),
-    }
-}
-
-fn main() {
-    // Gilrs::new() returns Result: on systems where the backend cannot init we
-    // report the error instead of unwrap-panicking. Having *no* gamepads is not
-    // an error — gilrs stays usable and plug-and-play events still arrive.
-    let mut gilrs = match gilrs::Gilrs::new() {
-        Ok(gilrs) => gilrs,
         Err(err) => {
-            eprintln!("Failed to initialize gamepad input: {err}");
-            std::process::exit(1);
+            tracing::error!("Capture failed: {err}");
+            eprintln!("Capture failed: {err}");
+            ExitCode::FAILURE
+        }
+    };
+    // The log writer thread drains the queue asynchronously and `logging` has
+    // no shutdown hook: a headless run exits right after printing, so give the
+    // writer a bounded moment or the final INFO/ERROR line could be lost.
+    std::thread::sleep(LOG_DRAIN_GRACE);
+    code
+}
+
+/// `--out` override decision: the value is the **exact output file path**. The
+/// template-produced path is replaced by making the value's parent directory
+/// `save_path` and its file name the filename template — the save pipeline
+/// (collision scan, subfolder creation, encoding) stays owned by `capture`,
+/// and the spec §4.2 collision rule still applies: when the file already
+/// exists, `capture` appends `-N` before the extension
+/// (`template::collision_variant`) instead of overwriting it. `--format`
+/// chooses the encoding, not the extension: the saved file keeps the exact
+/// name from `--out` even if its extension disagrees with the format. Returns
+/// false (error printed to stderr) when the path has no usable file name
+/// (a directory/root path) or the name is not valid UTF-8.
+fn apply_out_override(general: &mut General, out: &Path) -> bool {
+    let Some(name) = out.file_name().and_then(|name| name.to_str()) else {
+        eprintln!("invalid --out path {}: expected a file path", out.display());
+        return false;
+    };
+    // A relative file name has no parent: `save_path` becomes empty and the
+    // path resolves under the current directory.
+    general.save_path = out
+        .parent()
+        .map(|parent| parent.display().to_string())
+        .unwrap_or_default();
+    general.file_full_screen = name.to_owned();
+    general.file_window = name.to_owned();
+    true
+}
+
+/// Resident app (bare `virshot`, no subcommand): load settings with the spec §7
+/// defaults as the fallback — a missing file is auto-created with the defaults
+/// (spec §7, first run), a broken file logs the typed error and still runs on
+/// defaults without rewriting the user's file (startup init; the loop never
+/// fails on config). The single-instance guard (spec §1) is taken right after
+/// the config load: a lock held by a live process is a typed ERROR and exit 1,
+/// so no tray, hotkey, or window is ever created by a second instance. The
+/// settings drive the hotkey wiring: the controller is created on the MAIN
+/// thread (spec §4.1 — conflict/unavailable is a status +
+/// log, never a crash) and its registration report is logged per hotkey. Then
+/// the eframe settings window opens on the MAIN thread (Stage 8): while the
+/// window runs, the event loop drives it; closing the window hides it and
+/// keeps the process resident (hotkeys stay live; the tray can reopen it).
+/// The tray (Stage 10, spec §4.5) is attempted BEFORE the GUI on the MAIN
+/// thread so it exists even when the GUI cannot open: its failure is a typed
+/// ERROR log and the app keeps running without a tray. If the GUI cannot
+/// open, the main thread parks on an idle sleep tick that still polls the
+/// tray — the process stays resident rather than exiting (spec §5), and
+/// tray `Exit` ends the park loop (exit 0).
+fn run_resident(config_path: &Path) -> ExitCode {
+    let settings = config::load_or_create(config_path);
+    // Single-instance guard (spec §1): one resident process per config file.
+    // Acquired here — after logging and the config load, before the tray,
+    // hotkeys, and GUI — and held for the whole process lifetime, so `Drop`
+    // removes the lock on every exit path (GUI shutdown and the park-loop
+    // exit). A lock held by a live process ends startup before anything is
+    // built: typed ERROR + exit 1.
+    let _guard = match instance::InstanceGuard::acquire(config_path) {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::error!("virshot cannot start: {err}");
+            // Startup init: no window or tray exists to report through.
+            eprintln!("virshot cannot start: {err}");
+            // This run exits immediately, so the writer thread gets the same
+            // bounded drain a headless `shot` run does — otherwise the typed
+            // reason would be lost from the log.
+            std::thread::sleep(LOG_DRAIN_GRACE);
+            return ExitCode::FAILURE;
+        }
+    };
+    tracing::info!("Instance lock acquired (pid {})", std::process::id());
+    // One toast mailbox for the whole resident process: capture threads push,
+    // the GUI polls it in its logic pass (spec §4.3).
+    let toast = overlay::new_mailbox();
+    let (controller, registrations) =
+        match hotkeys::HotkeysController::start(settings.clone(), toast.clone()) {
+            Ok((controller, status)) => {
+                log_registrations(&status);
+                (Some(controller), status.registrations)
+            }
+            Err(err) => {
+                tracing::error!("Hotkeys unavailable: {err}");
+                (None, Vec::new())
+            }
+        };
+
+    // Tray first (spec §4.5): the icon must exist even if the GUI fails, and
+    // it is built on the MAIN thread. Failure keeps the app running.
+    let tray = match tray::TrayController::new() {
+        Ok(tray) => {
+            tracing::info!("System tray ready");
+            Some(tray)
+        }
+        Err(err) => {
+            tracing::error!("System tray unavailable: {err}");
+            None
         }
     };
 
-    println!("Listening for gamepad input... press any button to take a screenshot.");
-
-    // Names of currently connected gamepads, kept for Disconnected reporting.
-    let mut names: std::collections::HashMap<gilrs::GamepadId, String> = gilrs
-        .gamepads()
-        .map(|(id, pad)| (id, pad.name().to_owned()))
-        .collect();
-
-    if names.is_empty() {
-        println!("No gamepads connected yet — waiting for plug-and-play...");
-    } else {
-        println!("Connected gamepads:");
-        let mut sorted: Vec<&str> = names.values().map(String::as_str).collect();
-        sorted.sort_unstable();
-        for name in sorted {
-            println!("  {name}");
-        }
+    tracing::info!("Settings window opening");
+    if let Err(err) = gui::run(
+        config_path.to_owned(),
+        settings.clone(),
+        controller,
+        registrations,
+        toast.clone(),
+        tray.clone(),
+    ) {
+        tracing::error!("GUI failed: {err}");
+        tracing::info!("virshot idle: running without GUI");
+        park_without_gui(tray, settings, toast);
+        return ExitCode::SUCCESS;
     }
+    // `run_native` only returns on real shutdown (tray Exit) or startup
+    // failure; a clean shutdown exits 0.
+    ExitCode::SUCCESS
+}
 
-    loop {
-        while let Some(gilrs::Event { id, event, .. }) = gilrs.next_event() {
-            match event {
-                gilrs::EventType::Connected => {
-                    let name = gamepad_name(&gilrs, id);
-                    println!("{name} connected");
-                    names.insert(id, name);
+/// GUI-failure fallback (spec §5): park the MAIN thread and still serve the
+/// tray. Actions are polled on the idle tick (≤ 1 s latency): `Take
+/// screenshot` spawns a full-screen capture with the loaded settings and the
+/// shared mailbox; `Settings` degrades to a WARN (no window to show — the
+/// GUI failure was logged above); `Exit` sets [`RESIDENT_SHUTDOWN`] and the
+/// loop returns, so the process exits 0 — the only exit path without a GUI.
+fn park_without_gui(
+    tray: Option<tray::TrayController>,
+    settings: Settings,
+    toast: overlay::ToastMailbox,
+) {
+    while !RESIDENT_SHUTDOWN.load(Ordering::Relaxed) {
+        if let Some(tray) = &tray {
+            for action in tray.poll() {
+                match action {
+                    tray::TrayAction::Exit => {
+                        tracing::info!("virshot exiting from tray menu");
+                        RESIDENT_SHUTDOWN.store(true, Ordering::Relaxed);
+                    }
+                    tray::TrayAction::TakeScreenshot => {
+                        capture::spawn_capture(CaptureCommand {
+                            mode: CaptureMode::FullScreen,
+                            settings: settings.clone(),
+                            toast: toast.clone(),
+                        });
+                    }
+                    tray::TrayAction::ShowSettings => {
+                        tracing::warn!("Tray: Settings requested, but the GUI is unavailable");
+                    }
                 }
-                gilrs::EventType::Disconnected => {
-                    let name = names
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| gamepad_name(&gilrs, id));
-                    println!("{name} disconnected");
-                    names.remove(&id);
-                }
-                gilrs::EventType::ButtonPressed(button, _data) => {
-                    let name = gamepad_name(&gilrs, id);
-                    println!("{}", events::format_press(&name, &button));
-                    on_button_pressed(id);
-                }
-                _ => {}
             }
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(IDLE_TICK);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::helpers::{screenshot_filename, screenshots_dir};
-    use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
-
-    #[test]
-    fn screenshot_filename_matches_regex() {
-        // Equivalent of regex ^screenshot_\d{8}_\d{6}\.png$
-        let name = screenshot_filename(Local::now());
-        assert!(name.starts_with("screenshot_"), "prefix missing: {name}");
-        assert!(name.ends_with(".png"), "suffix missing: {name}");
-        let middle = &name["screenshot_".len()..name.len() - ".png".len()];
-        let parts: Vec<&str> = middle.split('_').collect();
-        assert_eq!(parts.len(), 2, "expected date_time middle: {name}");
-        assert_eq!(parts[0].len(), 8, "date part must be 8 digits: {name}");
-        assert_eq!(parts[1].len(), 6, "time part must be 6 digits: {name}");
-        assert!(
-            parts[0].chars().all(|c| c.is_ascii_digit()),
-            "date part not digits: {name}"
-        );
-        assert!(
-            parts[1].chars().all(|c| c.is_ascii_digit()),
-            "time part not digits: {name}"
-        );
-    }
-
-    #[test]
-    fn screenshot_filename_is_deterministic_for_fixed_instant() {
-        let naive = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
-            NaiveTime::from_hms_opt(12, 34, 56).unwrap(),
-        );
-        let now = Local.from_local_datetime(&naive).unwrap();
-        assert_eq!(screenshot_filename(now), "screenshot_20261101_123456.png");
-    }
-
-    #[test]
-    fn screenshots_dir_is_tmp_screenshots() {
-        assert_eq!(
-            screenshots_dir(),
-            std::path::PathBuf::from(".tmp/screenshots")
-        );
+/// Registration report (spec §4.1): registered combos at INFO, the reserved
+/// rect action at INFO, rejected combos at ERROR with the crate's reason. The
+/// app keeps running in every case.
+fn log_registrations(status: &hotkeys::StartStatus) {
+    for registration in &status.registrations {
+        match registration {
+            hotkeys::Registration::Registered { action, combo } => {
+                tracing::info!("Hotkey registered: {combo} ({})", action.label());
+            }
+            hotkeys::Registration::Failed {
+                action,
+                combo,
+                reason,
+            } => {
+                tracing::error!(
+                    "Hotkey not registered: {combo} ({}): {reason}",
+                    action.label()
+                );
+            }
+            hotkeys::Registration::Reserved { action, combo } => {
+                tracing::info!(
+                    "Hotkey reserved (rect area, out of MVP scope): {combo} ({})",
+                    action.label()
+                );
+            }
+        }
     }
 }

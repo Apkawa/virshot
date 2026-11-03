@@ -63,20 +63,45 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   `~/.cargo` is read-only, so bare `cargo` fails in the sandbox.
 - Temporary/scratch artifacts (screenshots, harnesses, logs) go only in `./.tmp/`;
   caches only in `./.cache/`; both are git-ignored, along with `target/`.
-- `gilrs` must be built with `default-features = false, features = ["xinput"]`
-  (default WGI backend delivers no events to a console/tray process on Windows).
+- Gamepad integration is deferred out of MVP (user decision 2026-11-02): the MVP
+  trigger is the global keyboard hotkey (system-wide hook); config `pad` field and
+  the UI bind field are reserved slots, no gamepad code/deps in the MVP. Future
+  Windows integration: an own `gamepad` module — a polling loop over HID via
+  `gameinput.dll` (`windows` crate `RawGameController`; button-STATE diff, not
+  timestamp diff; labels via `GetButtonLabel`). Linux: `gilrs` must be built with
+  `default-features = false, features = ["wgi"]` (without features it is a
+  compile_error; `xinput`+`wgi` is mutually-exclusive). Re-add `windows`/`gilrs`
+  deps with explicit user approval when the integration stage lands. Hardware
+  findings stand: the gilrs `wgi` backend gates reads on the controller timestamp
+  and generic HID pads report a constant timestamp, so presses never arrive
+  (hardware-verified on user's pad vendor=1118 product=2835). Share/console
+  behavior must be hardware-verified on Windows when the integration ships.
 
 ## Dependencies
 
 - **Language:** Rust (latest stable, rust version 1.99.1).
 - **UI and overlay:** `eframe` + `egui` (multi-viewport for the settings window and overlay).
-- **Gamepad:** `gilrs` (XInput / DirectInput; in this project built with
-  `default-features = false, features = ["xinput"]`).
+- **Gamepad:** deferred out of MVP (user decision 2026-11-02) — no gamepad deps in
+  Cargo.toml; config `pad` field + UI bind field are reserved slots. Future
+  integration: Windows — `windows` crate `RawGameController` via `gameinput.dll`
+  (own `gamepad` module; direct dep approved by user 2026-11-01, still in
+  Cargo.lock transitively via winit); Linux — `gilrs`
+  (`default-features = false, features = ["wgi"]`). Re-add with explicit user
+  approval. See Build & environment for why.
 - **Screen capture:** `xcap`.
-- **Global keyboard hotkeys:** TODO: research
+- **Global keyboard hotkeys:** `global-hotkey` (system-wide hotkey registration;
+  crate chosen by user research, approved 2026-11-03; v0.9.0 in registry, optional
+  `serde`/`tracing` features — add at Stage 6 when the wiring lands).
 - **System tray:** `tray-icon` (`default-features = false, features = ["ksni"]` —
   pure-Rust SNI/D-Bus backend; the default `libappindicator` backend would need GTK
   native libs on Linux). Integration with the winit/eframe event loop: still to solve.
+- **Folder picker:** `rfd` (spec §4.4 Browse button; approved by the user
+  2026-11-03; v0.17.2, default features `xdg-portal` + `wayland` — the blocking
+  `FileDialog::new().set_directory(..).pick_folder()` needs no async/tokio
+  feature; Windows native common controls, Linux XDG portal with a zenity
+  fallback; a missing backend returns `None`, never panics). No new native
+  build package: libdbus is `dlopen`d at runtime and absent backends degrade to
+  `None`.
 - **Configuration:** `serde` + `toml`.
 - **Error types:** `thiserror` (per-module error enums; typed errors over stringly `Err(String)`).
 - **Logging:** `tracing` + `tracing-subscriber` (file appender).
@@ -121,3 +146,11 @@ MinGW-w64 only; the Linux `xcap` chain needs `libudev-dev`, `libwayland-dev`,
 
 - MVP scope is defined in `docs/spec.md`; anything not listed there is out of scope
   until explicitly added by the user.
+
+## Design Principles
+
+### 1. KISS / YAGNI
+Choose the simplest solution that satisfies requirements and tests. Do not add speculative extensibility, configuration, interfaces, factories, or generic abstractions. Do not duplicate business rules or complex logic; however, tolerate local duplication rather than introduce a wrong abstraction.
+
+### 2. Single Semantics per Module (SRP)
+One module has one responsibility, expressed by its name. Do not mix unrelated concerns.

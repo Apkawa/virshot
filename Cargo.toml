@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gilrs = { version = "0.11.2", default-features = false, features = ["xinput"] }
 xcap = "0.9.8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 chrono = "0.4.45"
 thiserror = "2"
-eframe = "0.37.0"
+# Feature-trimmed for the <10 MB exe budget (spec §5): eframe defaults pull
+# wgpu + accesskit + clipboard/system_fonts/web_screen_reader, unused by the MVP
+# UI. glow renderer only. x11/wayland are kept for the Linux dev host (winit
+# compile-errors without a platform backend there); both are unix-only deps, so
+# the shipped Windows exe is unaffected.
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
 tracing = "0.1.44"
@@ -16,6 +21,26 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 clap = { version = "4.6.7", features = ["derive"] }
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 egui = "0.37.0"
+global-hotkey = "0.9.0"
+# Native folder picker for the General tab Browse button (spec §4.4, approved
+# by the user 2026-11-03). Default features (`xdg-portal` + `wayland`) are what
+# the BLOCKING API needs: `pollster` (unix-only, pulled by `xdg-portal`) drives
+# blocking-over-portal, Windows uses `windows-sys` common controls
+# (`src/backend/win_cid.rs`), Linux the XDG portal with a zenity fallback. No
+# async/tokio feature is enabled — verified in the locked 0.17.2 source.
+rfd = "0.17.2"
+
+# Gamepad integration is deferred out of MVP (user decision 2026-11-02, spec v4);
+# the reserved slot is plan Stage 7. When it lands, re-add (with user approval):
+#   [target.'cfg(windows)'.dependencies]
+#   windows = { version = "0.62.2", features = ["Gaming_Input"] }  # approved
+#   2026-11-01; pinned to the version already in Cargo.lock via winit; on Linux
+#   the `windows` crate does not compile (windows-future references Windows-only
+#   windows_threading::submit), hence target-scoped. Gaming_Input = gameinput.dll:
+#   RawGameController enumeration, button-STATE reading, GetButtonLabel — an own
+#   polling loop over HID with no timestamp gating (docs/spec.md §2/§3, AGENTS.md
+#   "Build & environment"). Linux side: gilrs = { version = "0.11.2",
+#   default-features = false, features = ["wgi"] } (needs explicit features).
 
 [dev-dependencies]
 rusty-hook = "^0.11.2"
