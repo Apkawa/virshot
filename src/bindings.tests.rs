@@ -24,6 +24,7 @@ fn parse_controls_defaults_returns_active_full_screen_and_window() {
         ActionBinding {
             action: Action::FullScreen,
             hotkey: HotKey::new(None, Code::PrintScreen),
+            pad: None,
             active: true,
         }
     );
@@ -32,6 +33,7 @@ fn parse_controls_defaults_returns_active_full_screen_and_window() {
         ActionBinding {
             action: Action::Window,
             hotkey: HotKey::new(Some(Modifiers::ALT), Code::PrintScreen),
+            pad: None,
             active: true,
         }
     );
@@ -46,27 +48,157 @@ fn parse_controls_rect_binding_is_reserved_inactive() {
         ActionBinding {
             action: Action::Rect,
             hotkey: HotKey::new(Some(Modifiers::CONTROL), Code::PrintScreen),
+            pad: None,
             active: false,
         }
     );
 }
 
 #[test]
-fn parse_controls_pad_value_is_accepted_and_ignored() {
+fn parse_controls_filled_pad_yields_parsed_pad_bind_and_hotkey() {
     let controls = Controls {
         full_screen: binding("PrintScreen", &[], Some("South")),
-        window: binding("PrintScreen", &["Alt"], Some("Start")),
-        rect: binding("PrintScreen", &["Ctrl"], Some("Select")),
+        window: Controls::default().window,
+        rect: Controls::default().rect,
     };
 
-    let parsed = parse_controls(&controls).expect("pad is a reserved slot, must not fail");
+    let parsed = parse_controls(&controls).expect("pad notation must parse");
 
-    assert_eq!(parsed[0].hotkey, HotKey::new(None, Code::PrintScreen));
+    assert_eq!(
+        parsed[0],
+        ActionBinding {
+            action: Action::FullScreen,
+            hotkey: HotKey::new(None, Code::PrintScreen),
+            pad: Some(PadBind::Controller(2)),
+            active: true,
+        }
+    );
+}
+
+#[test]
+fn parse_controls_system_pad_bind_yields_share() {
+    let controls = Controls {
+        full_screen: Controls::default().full_screen,
+        window: binding("PrintScreen", &["Alt"], Some("Share")),
+        rect: Controls::default().rect,
+    };
+
+    let parsed = parse_controls(&controls).expect("system pad buttons must parse");
+
+    assert_eq!(parsed[1].pad, Some(PadBind::Share));
     assert_eq!(
         parsed[1].hotkey,
         HotKey::new(Some(Modifiers::ALT), Code::PrintScreen)
     );
-    assert!(!parsed[2].active);
+}
+
+#[test]
+fn parse_controls_invalid_pad_returns_unknown_pad_error() {
+    let controls = Controls {
+        full_screen: Controls::default().full_screen,
+        window: binding("PrintScreen", &["Alt"], Some("nope")),
+        rect: Controls::default().rect,
+    };
+
+    let err = parse_controls(&controls).expect_err("bad pad notation must fail");
+
+    assert_eq!(
+        err,
+        Error::UnknownPad {
+            action: Action::Window,
+            pad: "nope".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn parse_controls_invalid_pad_error_names_action_and_pad() {
+    let controls = Controls {
+        full_screen: Controls::default().full_screen,
+        window: binding("PrintScreen", &["Alt"], Some("Select")),
+        rect: Controls::default().rect,
+    };
+
+    let err = parse_controls(&controls).expect_err("gilrs-only names are out of notation");
+
+    assert_eq!(
+        err.to_string(),
+        "unknown pad \"Select\" in binding [controls.window]"
+    );
+}
+
+#[test]
+fn parse_controls_missing_pad_field_is_none() {
+    let parsed = parse_controls(&Controls::default()).expect("defaults must parse");
+
+    assert_eq!(parsed[0].pad, None);
+    assert_eq!(parsed[1].pad, None);
+    assert_eq!(parsed[2].pad, None);
+}
+
+#[test]
+fn parse_pad_canonical_names_map_to_gameinput_indices() {
+    assert_eq!(parse_pad("North"), Some(PadBind::Controller(0)));
+    assert_eq!(parse_pad("East"), Some(PadBind::Controller(1)));
+    assert_eq!(parse_pad("South"), Some(PadBind::Controller(2)));
+    assert_eq!(parse_pad("West"), Some(PadBind::Controller(3)));
+    assert_eq!(parse_pad("LeftShoulder"), Some(PadBind::Controller(4)));
+    assert_eq!(parse_pad("RightShoulder"), Some(PadBind::Controller(5)));
+    assert_eq!(parse_pad("LeftTrigger"), Some(PadBind::Controller(6)));
+    assert_eq!(parse_pad("RightTrigger"), Some(PadBind::Controller(7)));
+    assert_eq!(parse_pad("RightThumbstick"), Some(PadBind::Controller(8)));
+    assert_eq!(parse_pad("LeftThumbstick"), Some(PadBind::Controller(9)));
+    assert_eq!(parse_pad("LeftStick"), Some(PadBind::Controller(10)));
+    assert_eq!(parse_pad("RightStick"), Some(PadBind::Controller(11)));
+}
+
+#[test]
+fn parse_pad_names_are_case_insensitive() {
+    assert_eq!(parse_pad("south"), Some(PadBind::Controller(2)));
+    assert_eq!(parse_pad("RIGHTSHOULDER"), Some(PadBind::Controller(5)));
+    assert_eq!(parse_pad("UNKNOWN:7"), Some(PadBind::Controller(7)));
+    assert_eq!(parse_pad("guide"), Some(PadBind::Guide));
+    assert_eq!(parse_pad("SHARE"), Some(PadBind::Share));
+}
+
+#[test]
+fn parse_pad_unknown_prefix_returns_raw_controller_index() {
+    assert_eq!(parse_pad("unknown:0"), Some(PadBind::Controller(0)));
+    assert_eq!(parse_pad("unknown:5"), Some(PadBind::Controller(5)));
+    assert_eq!(parse_pad("unknown:63"), Some(PadBind::Controller(63)));
+}
+
+#[test]
+fn parse_pad_unknown_index_out_of_range_returns_none() {
+    assert_eq!(parse_pad("unknown:64"), None);
+    assert_eq!(parse_pad("unknown:255"), None);
+    assert_eq!(parse_pad("unknown:-1"), None);
+}
+
+#[test]
+fn parse_pad_unknown_malformed_suffix_returns_none() {
+    assert_eq!(parse_pad("unknown:x"), None);
+    assert_eq!(parse_pad("unknown:"), None);
+    assert_eq!(parse_pad("unknown:0x1"), None);
+}
+
+#[test]
+fn parse_pad_system_buttons_return_guide_and_share() {
+    assert_eq!(parse_pad("Guide"), Some(PadBind::Guide));
+    assert_eq!(parse_pad("Share"), Some(PadBind::Share));
+}
+
+#[test]
+fn parse_pad_invalid_names_return_none() {
+    assert_eq!(parse_pad("South "), None);
+    assert_eq!(parse_pad("Joystick"), None);
+    assert_eq!(parse_pad("Select"), None);
+    assert_eq!(parse_pad("Start"), None);
+    assert_eq!(parse_pad("DPadUp"), None);
+    assert_eq!(parse_pad("Mode"), None);
+    assert_eq!(parse_pad("C"), None);
+    assert_eq!(parse_pad("Z"), None);
+    assert_eq!(parse_pad(""), None);
 }
 
 #[test]

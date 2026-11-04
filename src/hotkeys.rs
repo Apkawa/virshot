@@ -61,8 +61,10 @@
 //! [`HotkeysController`] — registration and live re-registration (Apply) run
 //! there, which is mandatory on Windows (WM_HOTKEY thread affinity) and
 //! equally correct on Linux. A dedicated listener OS thread blocks on the
-//! global event receiver, maps `id` → action, applies the thread-local
-//! debounce, and spawns the capture. Latest settings reach the listener via a
+//! global event receiver, maps `id` → action, fires through the SHARED
+//! debounce gate (the same `Mutex<bindings::Debounce>` instance the pad pump
+//! uses, spec §4.1 OR-fire — one shot per action per interval regardless of
+//! the trigger source), and spawns the capture. Latest settings reach the listener via a
 //! `Mutex<Settings>` mailbox used ONLY as a latest-config mailbox (an owned
 //! clone is taken per trigger — no shared capture state). Per-trigger parsing
 //! means a re-registered combo is honored by captures immediately, with no
@@ -106,6 +108,7 @@ use global_hotkey::hotkey::HotKey;
 use crate::bindings;
 use crate::bindings::Action;
 use crate::bindings::ActionBinding;
+use crate::bindings::Debounce;
 use crate::capture::CaptureCommand;
 use crate::capture::CaptureMode;
 use crate::capture::spawn_capture;
@@ -174,10 +177,12 @@ pub(crate) struct HotkeysController {
     /// Combos currently registered — unregistered on Apply before re-register,
     /// and on [`HotkeysController::pause`] for bind-by-press.
     registered: Vec<HotKey>,
-    /// Latest-config mailbox for the listener thread ONLY (owned clone per
-    /// trigger; no shared capture state, per the repo thread-boundary rule).
-    /// Also the source of truth for `restore`: it holds the settings published
-    /// by the last `apply`, never the GUI draft.
+    /// Latest-config mailbox for the listener thread AND the pad pump
+    /// (`gamepad`) — the same Arc `main` created and hands to both, so UI Apply
+    /// reaches every trigger source (owned clone per trigger; no shared capture
+    /// state, per the repo thread-boundary rule). Also the source of truth for
+    /// `restore`: it holds the settings published by the last `apply`, never the
+    /// GUI draft.
     mailbox: Arc<Mutex<Settings>>,
     /// Set by `pause` (capture mode active), cleared by `restore`/`apply`.
     paused: bool,
@@ -186,17 +191,25 @@ pub(crate) struct HotkeysController {
 impl HotkeysController {
     /// Parse controls, probe the backend, create the manager **on the calling
     /// (main) thread**, register the active combos, and spawn the event
-    /// listener thread. `toast` is the overlay mailbox the listener attaches to
-    /// every capture command.
+    /// listener thread. `mailbox` is the settings Arc `main` created — the
+    /// listener clones it per trigger, the pad pump reads the same Arc, and
+    /// [`HotkeysController::apply`] publishes it. `toast` is the overlay
+    /// mailbox the listener attaches to every capture command; `debounce` is
+    /// the trigger gate shared with the pad pump (`gamepad`), so keyboard and
+    /// pad triggers of one action share one ~250 ms window.
     ///
     /// Fails with `Error::Unavailable` (Linux without an X11 server) or
     /// [`Error::Manager`] (manager creation failed); a bindings parse failure
     /// returns [`Error::Binding`]. Per-hotkey registration failures are NOT
-    /// errors — they come back in [`StartStatus`].
+    /// errors — they come back in [`StartStatus`]. The mailbox is the caller's
+    /// on every failure path, so the pad pump and the GUI keep working without
+    /// a controller.
     pub(crate) fn start(
-        settings: Settings,
+        mailbox: Arc<Mutex<Settings>>,
         toast: ToastMailbox,
+        debounce: Arc<Mutex<Debounce>>,
     ) -> Result<(Self, StartStatus), Error> {
+        let settings = mailbox_settings(&mailbox).clone();
         let parsed =
             bindings::parse_controls(&settings.controls).map_err(|err| Error::Binding {
                 message: err.to_string(),
@@ -210,8 +223,11 @@ impl HotkeysController {
         let registrations = register(registrar.as_ref(), &parsed);
         let registered = active_hotkeys(&parsed);
 
-        let mailbox = Arc::new(Mutex::new(settings));
-        spawn_listener(Arc::clone(&mailbox), Arc::clone(&toast));
+        spawn_listener(
+            Arc::clone(&mailbox),
+            Arc::clone(&toast),
+            Arc::clone(&debounce),
+        );
 
         Ok((
             Self {
@@ -368,8 +384,10 @@ fn active_ids(parsed: &[ActionBinding]) -> HashMap<u32, Action> {
         .collect()
 }
 
-/// Action → capture mode; `None` for the reserved rect action.
-fn capture_mode(action: Action) -> Option<CaptureMode> {
+/// Action → capture mode; `None` for the reserved rect action. Consumed by
+/// this module's listener and by `gamepad` (the pad trigger fires the same
+/// shot path as the keyboard trigger).
+pub(crate) fn capture_mode(action: Action) -> Option<CaptureMode> {
     match action {
         Action::FullScreen => Some(CaptureMode::FullScreen),
         Action::Window => Some(CaptureMode::Window),
@@ -400,12 +418,15 @@ fn mailbox_settings(mailbox: &Arc<Mutex<Settings>>) -> MutexGuard<'_, Settings> 
 /// The listener thread (spec §6 Input Thread): blocks on the crate's global
 /// event receiver, dispatches debounced `Pressed` events into
 /// `capture::spawn_capture` with a fresh clone of the mailbox settings and the
-/// shared toast mailbox. The debounce state is thread-local
-/// (`bindings::Debounce`), the real clock is stamped at the module boundary
-/// (`chrono::Local::now`).
-fn spawn_listener(mailbox: Arc<Mutex<Settings>>, toast: ToastMailbox) {
+/// shared toast mailbox. The trigger gate is the SHARED `bindings::Debounce`
+/// (same instance the pad pump fires through, spec §4.1 OR-fire), the real
+/// clock is stamped at the module boundary (`chrono::Local::now`).
+fn spawn_listener(
+    mailbox: Arc<Mutex<Settings>>,
+    toast: ToastMailbox,
+    debounce: Arc<Mutex<Debounce>>,
+) {
     std::thread::spawn(move || {
-        let mut debounce = bindings::Debounce::default();
         for event in GlobalHotKeyEvent::receiver() {
             if event.state != HotKeyState::Pressed {
                 continue;
@@ -428,7 +449,7 @@ fn spawn_listener(mailbox: Arc<Mutex<Settings>>, toast: ToastMailbox) {
                 continue; // reserved action — never triggers
             };
 
-            if debounce.try_fire(action, Local::now()) {
+            if bindings::try_fire_shared(&debounce, action, Local::now()) {
                 spawn_capture(CaptureCommand {
                     mode,
                     settings,

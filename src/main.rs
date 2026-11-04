@@ -13,11 +13,13 @@
 //! debounce gate (pure logic); `hotkeys` owns the `global-hotkey` manager, the
 //! registration status report, and the input-thread event loop that dispatches
 //! debounced triggers into `spawn_capture` (spec §6 Input Thread). Gamepad
-//! input is deferred
-//! out of MVP (user decision 2026-11-02, spec v4): the future integration is
-//! an own polling loop over HID via `gameinput.dll` on Windows + `gilrs` on
-//! Linux (plan Stage 7 — DEFERRED). The MVP trigger is the global keyboard
-//! hotkey, wired in Stage 6. Bare `virshot` is the resident app (Stage 8):
+//! input (Stage 4, docs/spec.md §4.1 pad field): `gamepad` runs the Windows
+//! GameInput pump on its own thread (`crates/gamepad` path dep, target-scoped
+//! to Windows) and fires pad binds — including Guide/Share system buttons —
+//! through the SAME shared debounce gate as the hotkey listener, so an action
+//! fires once per interval whatever triggered it; Linux has no GameInput
+//! backend (gilrs stays out of scope), where the module only logs. The MVP
+//! keyboard trigger is the global hotkey, wired in Stage 6. Bare `virshot` is the resident app (Stage 8):
 //! loads config, registers hotkeys via `hotkeys::HotkeysController` (manager
 //! on the MAIN thread — Windows WM_HOTKEY thread affinity), opens the eframe
 //! settings window on the MAIN thread (`gui`); the window X button hides the
@@ -55,12 +57,12 @@
 //! `VIRSHOT_LOG_LEVEL` env override from Stage 1 is gone.
 
 #![forbid(unsafe_code)]
-
 #![windows_subsystem = "windows"]
 
 mod bindings;
 mod capture;
 mod config;
+mod gamepad;
 mod gui;
 mod hotkeys;
 mod instance;
@@ -76,6 +78,8 @@ use clap::ValueEnum;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -337,17 +341,43 @@ fn run_resident(config_path: &Path) -> ExitCode {
     // One toast mailbox for the whole resident process: capture threads push,
     // the GUI polls it in its logic pass (spec §4.3).
     let toast = overlay::new_mailbox();
-    let (controller, registrations) =
-        match hotkeys::HotkeysController::start(settings.clone(), toast.clone()) {
-            Ok((controller, status)) => {
-                log_registrations(&status);
-                (Some(controller), status.registrations)
-            }
-            Err(err) => {
-                tracing::error!("Hotkeys unavailable: {err}");
-                (None, Vec::new())
-            }
-        };
+    // One settings mailbox for the whole resident process: UI Apply publishes
+    // it, the hotkey listener clones it per trigger, and the pad pump re-parses
+    // pad binds per event from the SAME Arc (Stage 5) — so a re-bind or a pad
+    // bind captured in the UI fires without a restart.
+    let settings_mailbox = Arc::new(Mutex::new(settings.clone()));
+    // One trigger gate for BOTH sources (spec §4.1 OR-fire, ~250 ms per
+    // action): the hotkey listener and the gamepad pump fire through it, so a
+    // pad press and a keyboard combo of the same action produce ONE shot.
+    let debounce = Arc::new(Mutex::new(bindings::Debounce::default()));
+    let (controller, registrations) = match hotkeys::HotkeysController::start(
+        Arc::clone(&settings_mailbox),
+        toast.clone(),
+        Arc::clone(&debounce),
+    ) {
+        Ok((controller, status)) => {
+            log_registrations(&status);
+            (Some(controller), status.registrations)
+        }
+        Err(err) => {
+            tracing::error!("Hotkeys unavailable: {err}");
+            (None, Vec::new())
+        }
+    };
+
+    // Gamepad trigger (Stages 4-5, spec §4.1 pad-field OR-fire, §4.4 pad
+    // capture): on Windows the GameInput pump runs on its own thread, fires
+    // `pad` binds through the same gate, and reads/writes the pad-capture
+    // mailbox the GUI drives. On other platforms it logs and spawns nothing
+    // (Linux gilrs is out of scope — AGENTS.md hardware finding). A pump
+    // failure is an INFO log — the app keeps running on hotkeys alone.
+    let pad_capture = gamepad::new_capture_mailbox();
+    gamepad::spawn_pump(
+        Arc::clone(&settings_mailbox),
+        toast.clone(),
+        Arc::clone(&debounce),
+        Arc::clone(&pad_capture),
+    );
 
     // Tray first (spec §4.5): the icon must exist even if the GUI fails, and
     // it is built on the MAIN thread. Failure keeps the app running.
@@ -370,6 +400,8 @@ fn run_resident(config_path: &Path) -> ExitCode {
         registrations,
         toast.clone(),
         tray.clone(),
+        Arc::clone(&settings_mailbox),
+        Arc::clone(&pad_capture),
     ) {
         tracing::error!("GUI failed: {err}");
         tracing::info!("virshot idle: running without GUI");

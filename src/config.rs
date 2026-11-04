@@ -435,12 +435,15 @@ fn general_with_home(home: Option<&Path>) -> General {
 pub(crate) struct Binding {
     pub(crate) key: String,
     pub(crate) mods: Vec<String>,
-    /// Gamepad button name: a canonical `gilrs::Button` variant —
-    /// `"South"`, `"East"`, `"North"`, `"West"`, `"C"`, `"Z"`,
-    /// `"LeftTrigger"`, `"RightTrigger"`, `"Select"`, `"Start"`, `"Mode"`,
-    /// `"LeftThumb"`, `"RightThumb"`, `"DPadUp"`, `"DPadDown"`,
-    /// `"DPadLeft"`, `"DPadRight"`. `None` means no gamepad trigger;
-    /// `"Share"` is not a `gilrs::Button` variant and is not a valid value.
+    /// Gamepad trigger, pad notation (parsed by `bindings::parse_pad`,
+    /// case-insensitive): a canonical GameInput controller button name —
+    /// `"North"`, `"East"`, `"South"`, `"West"`, `"LeftShoulder"`,
+    /// `"RightShoulder"`, `"LeftTrigger"`, `"RightTrigger"`,
+    /// `"RightThumbstick"`, `"LeftThumbstick"`, `"LeftStick"`, `"RightStick"` —
+    /// `unknown:<N>` for a raw controller button index (`N` decimal 0..=63),
+    /// or a system button: `"Guide"`, `"Share"`. `None` means no gamepad
+    /// trigger; any other value is a config error
+    /// (`bindings::Error::UnknownPad`).
     pub(crate) pad: Option<String>,
 }
 

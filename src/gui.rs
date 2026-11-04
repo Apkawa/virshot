@@ -51,6 +51,15 @@
 //!   are paused via `hotkeys::HotkeysController::pause`/`restore` (Stage 18,
 //!   spec §4.4 v5.5) so a press of a live combo reaches this window instead of
 //!   firing the screenshot action; restore re-registers the APPLIED settings.
+//! - Pad-field bind-by-press (spec §4.1 + §4.4, Stage 5): clicking the pad field
+//!   starts capture for that row; the pump suppresses pad shots while ANY field
+//!   is capturing and commits the FIRST DOWN event into `gamepad::PadCapture`,
+//!   so `logic` drains the mailbox into the draft notation (`unknown:<N>`,
+//!   `Guide`, `Share`) — the GUI never receives a callback, only the mailbox.
+//!   The device-info label hint of the captured press (spec §9 — the GameInput
+//!   header has no `GetButtonLabel` slot) is kept per row
+//!   in memory and shown beside the field; on a host without GameInput the
+//!   field renders as a disabled placeholder (Linux gilrs is out of scope).
 //!
 //! Overlay toast viewport (spec §4.3, Stage 9): the `overlay::ToastState`
 //! lifecycle is driven from `logic` — so toasts appear even while the settings
@@ -120,9 +129,11 @@
 //!   `WindowAttributes::with_window_level(AlwaysOnTop)` → `WS_EX_TOPMOST`
 //!   (`egui-winit create_winit_window_attributes`, `winit window_state.rs`).
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -134,6 +145,14 @@ use crate::config::Binding;
 use crate::config::Format;
 use crate::config::OverlayPosition;
 use crate::config::Settings;
+use crate::gamepad::CaptureField;
+use crate::gamepad::PadCaptureMailbox;
+use crate::gamepad::PadDownEvent;
+use crate::gamepad::active_capture;
+use crate::gamepad::pad_button_label;
+use crate::gamepad::pad_notation;
+use crate::gamepad::set_capture_mode;
+use crate::gamepad::take_captured;
 use crate::hotkeys::HotkeysController;
 use crate::hotkeys::Registration;
 use crate::overlay::ToastMailbox;
@@ -633,8 +652,27 @@ const CAPTURE_TOOLTIP: &str = "Press a key combo to bind it — Esc to cancel.";
 /// Tooltip for the reserved-slot info icon (§4.4: rect is out of MVP scope).
 const RESERVED_TOOLTIP: &str = "reserved — out of MVP scope";
 
-/// Reserved gamepad slot label (no gamepad code in MVP, spec §4.4 + AGENTS).
-const GAMEPAD_PLACEHOLDER_LABEL: &str = "(gamepad — future integration)";
+/// Pad-field label while it is capturing a pad press (§4.4, Stage 5). The pump
+/// commits the first DOWN event, which also ends the capture; cancelling is a
+/// click of the same field again, or starting a keyboard capture — Escape does
+/// NOT cancel pad capture (it belongs to keyboard capture only).
+const PAD_CAPTURE_BUTTON_LABEL: &str = "Press a button…";
+
+/// Tooltip while the pad field is capturing.
+const PAD_CAPTURE_TOOLTIP: &str = "Press a gamepad button to bind it — click again to cancel.";
+
+/// Tooltip for a Windows pad button (spec §4.1: the pad trigger ORs with the
+/// keyboard combo through one shared debounce gate).
+const PAD_BIND_TOOLTIP: &str = "Gamepad trigger (fires together with the hotkey) — click to bind";
+
+/// Empty pad field on Windows, ready to capture.
+const PAD_UNBOUND_LABEL: &str = "pad — click to bind";
+
+/// Pad field on a host with no GameInput backend. Linux gilrs is out of scope
+/// (AGENTS.md hardware finding), so the field stays a disabled
+/// placeholder there; the pad trigger still works from `config.toml` notation
+/// once a Windows pump delivers it.
+const GAMEPAD_PLACEHOLDER_LABEL: &str = "(gamepad — Windows only)";
 
 /// Bind-button minimum width so the three rows stay visually aligned.
 const BIND_BUTTON_MIN_WIDTH: f32 = 170.0;
@@ -743,6 +781,40 @@ pub(crate) fn capture_transition(
     }
 }
 
+/// Pure pad-field click decision (§4.4, Stage 5): clicking an idle pad field
+/// starts capture for `action`; clicking a capturing field cancels it. The
+/// capture rules themselves (suppression, commit, notation) live in `gamepad`;
+/// this only decides which row the GUI is waiting on.
+pub(crate) fn pad_capture_toggle(capturing: bool, action: Action) -> Option<Action> {
+    if capturing { None } else { Some(action) }
+}
+
+/// Pure pad-capture drain decision (§4.4, Stage 5): the press the pump committed
+/// lands on the row that was capturing, as config notation (`gamepad::
+/// pad_notation` — `unknown:<N>` for a controller button, `Guide`/`Share` for a
+/// system button). A press with no capture target (cancelled mid-press) is
+/// dropped: no row is rewritten.
+pub(crate) fn pad_capture_target(
+    capturing: Option<Action>,
+    event: PadDownEvent,
+) -> Option<(Action, String)> {
+    capturing.map(|action| (action, pad_notation(event)))
+}
+
+/// Pad-field display label (§4.4, Stage 5): a host without a GameInput backend
+/// keeps the disabled placeholder (Linux gilrs is out of scope); on Windows the
+/// field shows the capture prompt while it waits for a press, the stored
+/// notation once bound, and the click-to-bind prompt when empty.
+pub(crate) fn pad_field_label(pad_supported: bool, capturing: bool, pad: Option<&str>) -> String {
+    if !pad_supported {
+        GAMEPAD_PLACEHOLDER_LABEL.to_owned()
+    } else if capturing {
+        PAD_CAPTURE_BUTTON_LABEL.to_owned()
+    } else {
+        pad.unwrap_or(PAD_UNBOUND_LABEL).to_owned()
+    }
+}
+
 /// Status icon kinds shown right of the bind button (spec §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IconKind {
@@ -820,6 +892,22 @@ pub(crate) struct SettingsApp {
     tab: Tab,
     /// Row whose "Capture press" is waiting for a key event (§4.4 bind-by-press).
     capture_press: Option<Action>,
+    /// Row whose pad field is waiting for a pad DOWN event (§4.4, Stage 5).
+    /// Windows only — the GameInput pump is what commits it; elsewhere the pad
+    /// field renders as a disabled placeholder and this stays `None`.
+    capture_pad: Option<Action>,
+    /// Pad-capture mailbox shared with the pump (`gamepad::PadCapture`): the
+    /// GUI sets the capture, the pump commits a press, `logic` drains it into
+    /// the draft — no callback crosses the thread boundary.
+    pad_capture: PadCaptureMailbox,
+    /// Settings mailbox shared with the hotkey listener and the pad pump
+    /// (`main` created it). Published by `apply`; needed here as the fallback
+    /// publisher when the hotkey controller is unavailable.
+    settings_mailbox: Arc<Mutex<Settings>>,
+    /// Device-info label hint of the last captured pad press per row (§9), shown
+    /// beside the pad button. In-memory only: a label is device-dependent, so it
+    /// is not part of the persisted notation.
+    pad_hints: HashMap<Action, String>,
     /// Toast mailbox filled by capture threads (spec §4.3); polled in `logic`.
     toast_mailbox: ToastMailbox,
     /// Current toast lifecycle — one toast at a time, newest replaces (spec §4.3).
@@ -842,6 +930,7 @@ pub(crate) struct SettingsApp {
 }
 
 impl SettingsApp {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         config_path: PathBuf,
         settings: Settings,
@@ -849,6 +938,8 @@ impl SettingsApp {
         status: Vec<Registration>,
         toast_mailbox: ToastMailbox,
         tray: Option<TrayController>,
+        settings_mailbox: Arc<Mutex<Settings>>,
+        pad_capture: PadCaptureMailbox,
     ) -> Self {
         Self {
             config_path,
@@ -858,6 +949,10 @@ impl SettingsApp {
             status,
             tab: Tab::General,
             capture_press: None,
+            capture_pad: None,
+            pad_capture,
+            settings_mailbox,
+            pad_hints: HashMap::new(),
             toast_mailbox,
             toast: None,
             toast_viewports: Vec::new(),
@@ -902,12 +997,98 @@ impl SettingsApp {
         }
         self.applied = self.draft.clone();
 
-        if let Some(controller) = &mut self.controller {
-            match controller.apply(self.draft.clone()) {
+        match &mut self.controller {
+            Some(controller) => match controller.apply(self.draft.clone()) {
                 Ok(status) => self.status = status.registrations,
                 Err(err) => tracing::error!("Hotkey re-registration failed: {err}"),
+            },
+            None => {
+                // No hotkey controller (Linux without X11, or a Windows manager
+                // failure): the pad pump reads the same settings mailbox, so it
+                // is published here instead. With a controller, `apply` publishes
+                // it (one publisher per Apply).
+                let mut mailbox = self
+                    .settings_mailbox
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *mailbox = self.draft.clone();
             }
         }
+    }
+
+    /// Keyboard bind-by-press state (Stage 18) plus the pad-capture mailbox:
+    /// while ANY field is capturing, the pad shot path stays silent (Stage 5,
+    /// spec §4.4). Any keyboard capture change — start or end — clears the pad
+    /// capture: one field captures at a time.
+    fn set_keyboard_capture(&mut self, action: Option<Action>) {
+        self.capture_press = action;
+        set_capture_mode(
+            &self.pad_capture,
+            action.map(|action| (CaptureField::Keyboard, action)),
+        );
+        self.capture_pad = None;
+    }
+
+    /// Start pad capture for one row (§4.4, Stage 5, Windows only). A keyboard
+    /// capture is cancelled first (registrations restored): one field captures
+    /// at a time.
+    fn start_pad_capture(&mut self, action: Action) {
+        if self.capture_press.is_some() {
+            self.set_keyboard_capture(None);
+            if let Some(transition) = capture_transition(true, CaptureInput::Escape) {
+                self.apply_capture_transition(transition);
+            }
+        }
+        self.capture_pad = Some(action);
+        set_capture_mode(&self.pad_capture, Some((CaptureField::Pad, action)));
+        tracing::info!("Pad capture started for {}", action.label());
+    }
+
+    /// Cancel pad capture (clicking the field again): the mailbox returns to
+    /// idle, so pad triggers fire again.
+    fn cancel_pad_capture(&mut self) {
+        self.capture_pad = None;
+        set_capture_mode(&self.pad_capture, None);
+    }
+
+    /// Drain the press the pump committed into the draft (§4.4, Stage 5): the
+    /// notation goes to the row that was capturing, capture state ends, and the
+    /// device-info label hint is remembered for that row. The draft is NOT
+    /// published until Apply (§4.4 semantics unchanged) — the pad trigger fires
+    /// the captured bind from then on. Runs in `logic`, so it also works with
+    /// the window hidden.
+    fn drain_pad_capture(&mut self) {
+        let Some(event) = take_captured(&self.pad_capture) else {
+            return;
+        };
+        // The notation is needed on BOTH branches: it goes to the row on a hit
+        // and names the dropped press on a miss, so it is computed before the
+        // decision rather than only inside the success pattern.
+        let notation = pad_notation(event);
+        let Some(target) = pad_capture_target(self.capture_pad.take(), event) else {
+            // The mailbox is the shared truth, so naming it distinguishes a
+            // cancelled pad capture from a keyboard capture that never commits.
+            tracing::warn!(
+                "Pad press ignored: {notation} — no pad field is capturing (mailbox active {:?})",
+                active_capture(&self.pad_capture),
+            );
+            return;
+        };
+        let (action, notation) = target;
+        self.binding_mut(action).pad = Some(notation.clone());
+        // Label hint (§9) of the press just captured, when the device labels it.
+        // A re-capture replaces the hint; a press with no label (system button,
+        // v0 device, disconnected) clears the stale one, so the row never shows
+        // a label from an earlier press.
+        match pad_button_label(event) {
+            Some(hint) => {
+                self.pad_hints.insert(action, hint);
+            }
+            None => {
+                self.pad_hints.remove(&action);
+            }
+        }
+        tracing::info!("Pad bind set in draft: {} → {notation}", action.label());
     }
 
     /// Drive the hotkey pause/restore transition on the controller (Stage 18).
@@ -951,7 +1132,7 @@ impl SettingsApp {
             } = event
             {
                 if key == egui::Key::Escape {
-                    self.capture_press = None;
+                    self.set_keyboard_capture(None);
                     if let Some(transition) = capture_transition(true, CaptureInput::Escape) {
                         self.apply_capture_transition(transition);
                     }
@@ -964,7 +1145,7 @@ impl SettingsApp {
                 let binding = self.binding_mut(action);
                 let pad = binding.pad.clone();
                 *binding = binding_from_press(name, mods, pad);
-                self.capture_press = None;
+                self.set_keyboard_capture(None);
                 if let Some(transition) = capture_transition(true, CaptureInput::Commit) {
                     self.apply_capture_transition(transition);
                 }
@@ -1259,7 +1440,11 @@ impl SettingsApp {
                                 {
                                     self.apply_capture_transition(transition);
                                 }
-                                self.capture_press = if capturing { None } else { Some(action) };
+                                self.set_keyboard_capture(if capturing {
+                                    None
+                                } else {
+                                    Some(action)
+                                });
                             }
 
                             if let Some(icon) = icon {
@@ -1279,7 +1464,44 @@ impl SettingsApp {
                             }
                         });
 
-                        ui.add_enabled(false, egui::Button::new(GAMEPAD_PLACEHOLDER_LABEL));
+                        // Pad field (§4.1 + §4.4, Stage 5): on Windows it is a
+                        // real bind-by-press button — click starts capture, the
+                        // pump commits the first DOWN event into the mailbox and
+                        // `logic` writes the notation into the draft; a click
+                        // while capturing cancels. On a host without GameInput
+                        // it stays a disabled placeholder (Linux gilrs is out of
+                        // scope). Inside `ui.add_enabled_ui(!reserved)` the
+                        // button is disabled on the rect row, so a reserved
+                        // action never gets a pad bind from the UI either.
+                        let pad_capturing = self.capture_pad == Some(action);
+                        let pad_hint = self.pad_hints.get(&action).cloned();
+                        if cfg!(windows) {
+                            let pad_label = pad_field_label(
+                                true,
+                                pad_capturing,
+                                self.binding(action).pad.as_deref(),
+                            );
+                            let pad_button = egui::Button::new(pad_label)
+                                .min_size(egui::Vec2::new(BIND_BUTTON_MIN_WIDTH, 0.0));
+                            let pad_response = if pad_capturing {
+                                ui.add(pad_button).on_hover_text(PAD_CAPTURE_TOOLTIP)
+                            } else {
+                                ui.add(pad_button).on_hover_text(PAD_BIND_TOOLTIP)
+                            };
+                            if pad_response.clicked() {
+                                match pad_capture_toggle(pad_capturing, action) {
+                                    Some(start) => self.start_pad_capture(start),
+                                    None => self.cancel_pad_capture(),
+                                }
+                            }
+                            // Device-info label hint (§9) of the last captured
+                            // press for this row — in-memory, never persisted.
+                            if let Some(hint) = pad_hint {
+                                ui.label(format!("({hint})"));
+                            }
+                        } else {
+                            ui.add_enabled(false, egui::Button::new(GAMEPAD_PLACEHOLDER_LABEL));
+                        }
 
                         ui.end_row();
                     });
@@ -1372,6 +1594,11 @@ impl eframe::App for SettingsApp {
                 self.draft = self.applied.clone();
             }
         }
+        // Pad-capture mailbox (Stage 5): the pump committed a press on its own
+        // thread; the newest-only drain writes it into the draft here, so a pad
+        // press is recorded even while the settings window is hidden.
+        self.drain_pad_capture();
+
         self.update_toast(ctx);
 
         // Tray events arrive on crossbeam channels and never wake the winit
@@ -1424,8 +1651,14 @@ impl eframe::App for SettingsApp {
 /// tray event handling here satisfies the main-thread affinity every backend
 /// expects). `toast_mailbox` is the overlay mailbox shared with the hotkey
 /// listener; `tray` is the tray controller (spec §4.5) or `None` after a
-/// logged tray failure. Returns only if graphics setup failed; the caller
-/// falls back to the idle loop so the process stays resident (spec §5).
+/// logged tray failure; `settings_mailbox` is the settings mailbox `main`
+/// created for the hotkey listener and the pad pump (Apply publishes it), and
+/// `pad_capture` is the pad-capture mailbox shared with the pump (§4.4,
+/// Stage 5). Returns only if
+/// graphics setup failed; the caller falls back to the idle loop so the process
+/// stays resident (spec §5).
+#[allow(clippy::too_many_arguments)] // Startup wiring: one call site in `main`, each shared
+// mailbox named explicitly (same shape as `SettingsApp::new`).
 pub(crate) fn run(
     config_path: PathBuf,
     settings: Settings,
@@ -1433,6 +1666,8 @@ pub(crate) fn run(
     status: Vec<Registration>,
     toast_mailbox: ToastMailbox,
     tray: Option<TrayController>,
+    settings_mailbox: Arc<Mutex<Settings>>,
+    pad_capture: PadCaptureMailbox,
 ) -> Result<(), Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1455,6 +1690,8 @@ pub(crate) fn run(
                 status,
                 toast_mailbox,
                 tray,
+                settings_mailbox,
+                pad_capture,
             )))
         }),
     )

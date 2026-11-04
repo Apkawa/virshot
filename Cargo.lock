@@ -1295,6 +1295,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gamepad"
+version = "0.1.0"
+
+[[package]]
 name = "gbm"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3927,6 +3931,7 @@ dependencies = [
  "clap",
  "eframe",
  "egui",
+ "gamepad",
  "global-hotkey",
  "image",
  "rfd",

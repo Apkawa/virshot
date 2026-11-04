@@ -58,38 +58,58 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   `~/.cargo` is read-only, so bare `cargo` fails in the sandbox.
 - Temporary/scratch artifacts (screenshots, harnesses, logs) go only in `./.tmp/`;
   caches only in `./.cache/`; both are git-ignored, along with `target/`.
-- Gamepad integration is deferred out of MVP (user decision 2026-11-02): the MVP
-  trigger is the global keyboard hotkey (system-wide hook); config `pad` field and
-  the UI bind field are reserved slots, no gamepad code/deps in the MVP. Future
-  Windows integration: an own `gamepad` module — a polling loop over HID via
-  `gameinput.dll` (`windows` crate `RawGameController`; button-STATE diff, not
-  timestamp diff; labels via `GetButtonLabel`). Linux: `gilrs` must be built with
-  `default-features = false, features = ["wgi"]` (without features it is a
-  compile_error; `xinput`+`wgi` is mutually-exclusive). Re-add `windows`/`gilrs`
-  deps with explicit user approval when the integration stage lands. Hardware
-  findings stand: the gilrs `wgi` backend gates reads on the controller timestamp
-  and generic HID pads report a constant timestamp, so presses never arrive
-  (hardware-verified on user's pad vendor=1118 product=2835). Share/console
-  behavior must be hardware-verified on Windows when the integration ships.
+- Gamepad trigger ships on Windows (task `2026-11-03_gamepad-integration`,
+  2026-11-04): the trigger is the global keyboard hotkey **OR** a pad button —
+  both sources fire through one shared ~250 ms debounce gate
+  (`bindings::try_fire_shared`). Windows backend: `crates/gamepad` — a
+  hand-written COM shim over the `gameinput.dll` exports (zero crates.io deps,
+  no `windows` crate added), mechanics unchanged from the PoC: focus policy
+  before registration, v3→v2→v0 negotiation, `Dispatch(5000µs)` pump on the
+  dedicated thread + 50 ms button **STATE-diff** poll (not timestamp diff);
+  virshot computes the 0→1 DOWN edges (`bits & !previous`) itself, Guide/Share
+  arrive as system-button edges, button labels come from the device-info block
+  (`gamepad::button_label`) — the vendored header has **no** `GetButtonLabel`
+  slot on `IGameInputDevice`. Pad notation in config `pad`: canonical GameInput
+  names, `unknown:<N>` (raw index), `Guide`, `Share`; the UI pad field captures
+  a press ("press a button") and writes that notation, cancel = click the field
+  again (Esc cancels keyboard capture only); any active capture suppresses pad
+  shots. Linux stays **out of scope**: `gilrs` is not added — hardware finding:
+  the gilrs `wgi` backend gates reads on the controller timestamp and generic HID
+  pads report a constant timestamp, so presses never arrive (hardware-verified
+  on user's pad vendor=1118 product=2835). Deferred: Windows hardware acceptance
+  run (Share/Guide behavior on the real pad — docs/spec.md §9). `hidpad-poc/`
+  stays as the historical PoC; the library duplicates it deliberately.
 
 ## Dependencies
 
 - **Language:** Rust (latest stable, rust version 1.99.1).
 - **UI and overlay:** `eframe` + `egui` (multi-viewport for the settings window and overlay).
-- **Gamepad:** deferred out of MVP (user decision 2026-11-02) — no gamepad deps in
-  Cargo.toml; config `pad` field + UI bind field are reserved slots. Future
-  integration: Windows — `windows` crate `RawGameController` via `gameinput.dll`
-  (own `gamepad` module; direct dep approved by user 2026-11-01, still in
-  Cargo.lock transitively via winit); Linux — `gilrs`
-  (`default-features = false, features = ["wgi"]`). Re-add with explicit user
-  approval. See Build & environment for why.
+- **Gamepad:** shipped on Windows (2026-11-04, task
+  `2026-11-03_gamepad-integration`) — path dep
+  `gamepad = { path = "crates/gamepad" }` under
+  `[target."cfg(windows)".dependencies]`; **zero crates.io deps** — the backend is
+  a hand-written `gameinput.dll` COM shim, so the earlier `windows` crate plan
+  (`RawGameController`) was superseded and **no new crates.io dependency was
+  added** (nothing needed approval). `crates/gamepad` is deliberately **not** a
+  workspace member (the root manifest declares no `[workspace]`); build/test it
+  from its own directory (`cd crates/gamepad && ../../cargo.sh test`). The
+  `windows` crate present in `Cargo.lock` is transitive via **`xcap` 0.9.8** —
+  winit uses `windows-sys`, not `windows`. Linux `gilrs` stays out of scope (see
+  Build & environment for the hardware finding); a Linux backend, if ever added,
+  needs explicit user approval like any other new dep.
 - **Screen capture:** `xcap`.
 - **Global keyboard hotkeys:** `global-hotkey` (system-wide hotkey registration;
-  crate chosen by user research, approved 2026-11-03; v0.9.0 in registry, optional
-  `serde`/`tracing` features — add at Stage 6 when the wiring lands).
+  crate chosen by user research, approved 2026-11-03; v0.9.0 with **default
+  features** — the optional `serde`/`tracing` features were never needed, the
+  wiring shipped without them). Manager created and re-registered on the main
+  thread (Windows `WM_HOTKEY` affinity with the winit pump); events drained in
+  the eframe logic pass; registrations are paused/restored around keyboard
+  bind-by-press capture. The pad half of the OR-fire lives in `src/gamepad.rs`
+  over the same shared debounce gate.
 - **System tray:** `tray-icon` (`default-features = false, features = ["ksni"]` —
   pure-Rust SNI/D-Bus backend; the default `libappindicator` backend would need GTK
-  native libs on Linux). Integration with the winit/eframe event loop: still to solve.
+  native libs on Linux). Integration with the winit/eframe event loop: solved —
+  tray events are handled in the main-thread eframe pass (`gui::run`).
 - **Folder picker:** `rfd` (spec §4.4 Browse button; approved by the user
   2026-11-03; v0.17.2, default features `xdg-portal` + `wayland` — the blocking
   `FileDialog::new().set_directory(..).pick_folder()` needs no async/tokio

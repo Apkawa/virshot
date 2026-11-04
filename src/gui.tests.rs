@@ -690,3 +690,74 @@ fn capture_transition_escape_and_commit_restore_only_while_capturing() {
     assert_eq!(capture_transition(false, CaptureInput::Escape), None);
     assert_eq!(capture_transition(false, CaptureInput::Commit), None);
 }
+
+#[test]
+fn pad_capture_toggle_idle_click_starts_capture_on_that_row() {
+    assert_eq!(
+        pad_capture_toggle(false, Action::FullScreen),
+        Some(Action::FullScreen)
+    );
+}
+
+#[test]
+fn pad_capture_toggle_reclick_while_capturing_cancels() {
+    assert_eq!(pad_capture_toggle(true, Action::FullScreen), None);
+}
+
+#[test]
+fn pad_capture_target_records_raw_index_notation_on_capturing_row() {
+    assert_eq!(
+        pad_capture_target(
+            Some(Action::Window),
+            PadDownEvent::Controller {
+                device: 0,
+                index: 7
+            },
+        ),
+        Some((Action::Window, "unknown:7".to_owned()))
+    );
+}
+
+#[test]
+fn pad_capture_target_records_system_button_names() {
+    assert_eq!(
+        pad_capture_target(Some(Action::FullScreen), PadDownEvent::Guide),
+        Some((Action::FullScreen, "Guide".to_owned()))
+    );
+    assert_eq!(
+        pad_capture_target(Some(Action::FullScreen), PadDownEvent::Share),
+        Some((Action::FullScreen, "Share".to_owned()))
+    );
+}
+
+#[test]
+fn pad_capture_target_without_capturing_row_drops_the_press() {
+    assert_eq!(pad_capture_target(None, PadDownEvent::Guide), None);
+}
+
+#[test]
+fn pad_field_label_without_gameinput_backend_is_disabled_placeholder() {
+    assert_eq!(
+        pad_field_label(false, false, Some("South")),
+        GAMEPAD_PLACEHOLDER_LABEL
+    );
+    assert_eq!(
+        pad_field_label(false, true, Some("South")),
+        GAMEPAD_PLACEHOLDER_LABEL
+    );
+}
+
+#[test]
+fn pad_field_label_capturing_shows_press_prompt() {
+    assert_eq!(
+        pad_field_label(true, true, Some("South")),
+        PAD_CAPTURE_BUTTON_LABEL
+    );
+}
+
+#[test]
+fn pad_field_label_shows_notation_or_click_to_bind_prompt() {
+    assert_eq!(pad_field_label(true, false, Some("unknown:3")), "unknown:3");
+    assert_eq!(pad_field_label(true, false, Some("Guide")), "Guide");
+    assert_eq!(pad_field_label(true, false, None), PAD_UNBOUND_LABEL);
+}

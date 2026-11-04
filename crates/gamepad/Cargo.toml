@@ -1,0 +1,19 @@
+[package]
+name = "gamepad"
+version = "0.1.0"
+edition = "2024"
+
+# No dependencies: the GameInput shim is hand-written over the `gameinput.dll`
+# exports (`LoadLibraryW` / `GetProcAddress` from the Windows ABI), and the
+# layout tests are std-only. `vendor/GameInput.h` is the ABI authority; see
+# `vendor/NOTICE.md` for its provenance.
+#
+# Deliberately NOT a workspace member: the repo root `Cargo.toml` declares no
+# `[workspace]`, so this manifest stands alone and the root `./cargo.sh check`
+# never compiles it. Build/test it from this directory:
+#   cd crates/gamepad && ../../cargo.sh test
+#   cd crates/gamepad && ../../cargo.sh build --target x86_64-pc-windows-gnu
+
+[lib]
+name = "gamepad"
+path = "src/lib.rs"
