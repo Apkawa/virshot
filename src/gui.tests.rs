@@ -362,3 +362,58 @@ fn pad_field_label_shows_notation_or_click_to_bind_prompt() {
     assert_eq!(pad_field_label(true, false, Some("Guide")), "Guide");
     assert_eq!(pad_field_label(true, false, None), PAD_UNBOUND_LABEL);
 }
+
+#[test]
+fn warning_color_image_embedded_asset_decodes_128x128() {
+    // egui 0.37 has no PNG loader, so the embedded triangle asset goes
+    // through `icons::rgba` into a straight-alpha ColorImage.
+    let image = warning_color_image().expect("embedded warning-icon asset must decode");
+    assert_eq!(image.size, [128, 128]);
+    assert_eq!(image.pixels.len(), 128 * 128);
+}
+
+#[test]
+fn warning_color_image_embedded_asset_has_yellow_and_black_pixels() {
+    // The warning triangle body is yellow and the outline/exclamation is
+    // black, both fully opaque — the decoded image must carry them.
+    let image = warning_color_image().expect("embedded warning-icon asset must decode");
+    let has_yellow = image.pixels.iter().any(|pixel| {
+        let [r, g, b, a] = pixel.to_srgba_unmultiplied();
+        r > 200 && g > 140 && b < 120 && a > 200
+    });
+    let has_black = image.pixels.iter().any(|pixel| {
+        let [r, g, b, a] = pixel.to_srgba_unmultiplied();
+        r < 80 && g < 80 && b < 80 && a > 200
+    });
+    assert!(has_yellow, "warning icon must contain opaque yellow pixels");
+    assert!(has_black, "warning icon must contain opaque black pixels");
+}
+
+#[test]
+fn app_window_icon_embedded_asset_returns_icon_data_128x128() {
+    let icon = app_window_icon().expect("embedded app-icon asset must decode");
+    assert_eq!(icon.width, 128);
+    assert_eq!(icon.height, 128);
+    assert_eq!(icon.rgba.len(), 128 * 128 * 4);
+}
+
+#[test]
+fn app_window_icon_embedded_asset_has_transparent_corners() {
+    // Straight (unmultiplied) alpha: the embedded asset's corner pixels are
+    // fully transparent, so the window icon keeps its rounded silhouette.
+    let icon = app_window_icon().expect("embedded app-icon asset must decode");
+    let stride = icon.width as usize * 4;
+    let corners = [
+        0,
+        stride - 4,
+        stride * (icon.height as usize - 1),
+        icon.rgba.len() - 4,
+    ];
+    for corner in corners {
+        assert_eq!(
+            icon.rgba[corner + 3],
+            0,
+            "corner alpha must be 0 at {corner}"
+        );
+    }
+}

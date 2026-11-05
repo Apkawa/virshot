@@ -9,17 +9,17 @@
 #   start  start the app, assert the settings window exists (+ geometry)
 #   window window geometry, window PNG (non-blank), root shot
 #   shot   hotkey capture: windowfocus + `xdotool key Print` -> Saved: + file
-#   tray   D-Bus tray evidence: bus name, ToolTip, IconPixmap PNG, menu labels,
-#          Activate/Settings re-show, menu Exit terminates the app
+#   tray   D-Bus tray evidence: bus name, ToolTip, IconPixmap PNG (app asset),
+#          menu labels, Activate/Settings re-show, menu Exit terminates the app
 #   log    log-content assertions (hotkey registration + tray ready, no-WM)
 #   stop   tray menu Exit (dbusmenu Event) -> clean exit + lock removed
 #   all    window + log + shot + tray + wm extras + stop
 #
 # Options:
 #   --config <path>  use this config instead of the generated scratch config
-#   --wm             run openbox: EWMH + `shot --window` + window hide/re-show;
-#                  global hotkey registration FAILS under a WM, so the hotkey
-#                  assertions are skipped in this mode
+#   --wm             run openbox: EWMH (incl. window `_NET_WM_ICON`) +
+#                  `shot --window` + window hide/re-show; global hotkey
+#                  registration FAILS under a WM, so hotkey asserts are skipped
 #   --keep           keep the scratch dir (default: delete it on exit)
 #   --timeout <s>    poll budget for window/exit waits (default 20)
 #
@@ -229,13 +229,20 @@ if [ "${UIVERIFY_INNER:-}" = 1 ]; then
     NAME=$(tray_name)
     if [ -n "$NAME" ]; then pass "tray bus name present ($NAME)"; else fail "tray bus name missing"; return 1; fi
 
-    if timeout 20 python3 "$D/tray/sni.py" "$NAME" props "$D/tray/icon.raw" >"$D/tray/props.txt" 2>&1; then
+    if timeout 20 python3 "$D/tray/sni.py" "$NAME" props "$D/tray/icon.raw" "$D/tray/icon.png" >"$D/tray/props.txt" 2>&1; then
       note "$(cat "$D/tray/props.txt")"
       grep -q 'virshot' "$D/tray/props.txt" && pass "ToolTip carries virshot" || fail "ToolTip missing virshot text"
-      grep -q 'IconPixmap 32x32' "$D/tray/props.txt" && pass "IconPixmap is 32x32" || fail "IconPixmap is not 32x32"
-      if timeout 20 convert -size 32x32 -depth 8 rgba:"$D/tray/icon.raw" "$D/tray/icon.png" 2>/dev/null \
-         && identify -format '%wx%h\n' "$D/tray/icon.png" | grep -q '32x32'; then
-        pass "IconPixmap converted to PNG 32x32 ($D/tray/icon.png)"
+      # Tray icon = embedded app asset (icons::APP_ICON_PNG, 128×128 RGBA PNG),
+      # not the old procedural 32×32 glyph: 128*128*4 = 65536 ARGB bytes.
+      grep -q 'IconPixmap 128x128 bytes=65536' "$D/tray/props.txt" \
+        && pass "IconPixmap is 128x128 app asset (bytes=65536)" || fail "IconPixmap is not 128x128 bytes=65536"
+      if timeout 20 identify -format '%wx%h\n' "$D/tray/icon.png" 2>/dev/null | grep -q '128x128'; then
+        pass "IconPixmap converted to PNG 128x128 ($D/tray/icon.png)"
+        # Real camera asset, not transparent garbage: transparent rounded corners
+        # (corner alpha 0), an opaque body, and the asset's gray (80,80,80) fill.
+        grep -qE 'IconPNG 128x128 corner_alpha=0 opaque_pixels=[1-9][0-9]* gray80_pixels=[1-9]' "$D/tray/props.txt" \
+          && pass "icon.png is the app camera asset (corner alpha 0, opaque body, gray 80,80,80)" \
+          || fail "icon.png is not the app camera asset (see IconPNG line)"
       else
         fail "IconPixmap PNG conversion failed"
       fi
@@ -323,6 +330,18 @@ if [ "${UIVERIFY_INNER:-}" = 1 ]; then
       && pass "wmctrl -m reports Name: Openbox" || fail "wmctrl -m does not report Openbox"
     timeout 10 xdotool getactivewindow >/dev/null 2>&1 \
       && pass "xdotool getactivewindow rc 0 (EWMH focus)" || fail "xdotool getactivewindow failed"
+    # Window icon (EWMH): gui::app_window_icon attaches icons::APP_ICON_PNG at
+    # window creation (ViewportBuilder::with_icon); winit X11 writes _NET_WM_ICON
+    # as CARDINAL [width, height, ARGB pixels...]. Observed here under Xvfb +
+    # openbox: xprop prints `_NET_WM_ICON(CARDINAL) = Icon (128 x 128):` and
+    # truncates the pixel body ("(not shown)"), so presence + dimensions are what
+    # this can pin — the pixel content is covered by the tray IconPixmap check.
+    local icon_line
+    icon_line=$(timeout 10 xprop -id "$WIN" _NET_WM_ICON 2>&1 | head -1 || true)
+    note "$icon_line"
+    printf '%s' "$icon_line" | grep -q 'Icon (128 x 128)' \
+      && pass "window _NET_WM_ICON present, 128x128 app asset" \
+      || fail "window _NET_WM_ICON missing or not 128x128: $icon_line"
     note "$(xwininfo -id "$WIN" 2>/dev/null | grep -E 'Relative upper-left' | tr -s ' ' || true)"
     local attempt rc=1
     for attempt in 1 2 3; do
@@ -401,6 +420,7 @@ import sys
 import dbus
 
 name, mode, arg = sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""
+png = sys.argv[4] if len(sys.argv) > 4 else ""
 bus = dbus.SessionBus()
 IFACE = "org.kde.StatusNotifierItem"
 
@@ -413,6 +433,29 @@ if mode == "props":
         print(f"IconPixmap {width}x{height} bytes={len(data)}")
         with open(arg, "wb") as f:
             f.write(data)
+        if png:
+            # SNI IconPixmap is network-order ARGB (tray-icon ksni rotates each
+            # RGBA pixel); ImageMagick has no ARGB raw reader, so reorder with
+            # PIL and save a real alpha PNG.
+            from PIL import Image
+
+            rgba = bytearray(len(data))
+            rgba[0::4] = data[1::4]
+            rgba[1::4] = data[2::4]
+            rgba[2::4] = data[3::4]
+            rgba[3::4] = data[0::4]
+            img = Image.frombytes("RGBA", (width, height), bytes(rgba))
+            img.save(png)
+            opaque = gray80 = 0
+            for pixel in img.getdata():
+                if pixel[3] == 255:
+                    opaque += 1
+                if pixel == (80, 80, 80, 255):
+                    gray80 += 1
+            print(
+                f"IconPNG {width}x{height} corner_alpha={img.getpixel((0, 0))[3]} "
+                f"opaque_pixels={opaque} gray80_pixels={gray80}"
+            )
 elif mode == "layout":
     menu = dbus.Interface(bus.get_object(name, "/MenuBar"), "com.canonical.dbusmenu")
     revision, layout = menu.GetLayout(0, -1, [])

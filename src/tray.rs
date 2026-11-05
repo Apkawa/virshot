@@ -63,67 +63,13 @@ const MENU_ID_EXIT: &str = "virshot-exit";
 /// Tooltip shown by hosts that support one (ksni exposes it).
 const TOOLTIP: &str = "virshot";
 
-/// Built-in icon size (spec §4.5: simple camera glyph; custom icons are out
-/// of MVP scope).
-const ICON_SIZE: u32 = 32;
-
-/// Colors of the camera glyph: dark body, light lens ring, darker lens core.
-const BODY_COLOR: [u8; 4] = [80, 80, 80, 255];
-const LENS_RING_COLOR: [u8; 4] = [200, 200, 200, 255];
-const LENS_CORE_COLOR: [u8; 4] = [24, 24, 24, 255];
-
-/// Draw the 32×32 camera glyph into an RGBA buffer (transparent background):
-/// body rect, viewfinder bump on top, lens ring + dark lens core. Pure code,
-/// no image files. Returned buffer is exactly `ICON_SIZE * ICON_SIZE` pixels.
-pub(crate) fn camera_glyph_rgba() -> Vec<u8> {
-    let mut img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::new(ICON_SIZE, ICON_SIZE);
-
-    // Viewfinder bump (top-left) and camera body.
-    fill_rect(&mut img, 8, 4, 14, 7, BODY_COLOR);
-    fill_rect(&mut img, 3, 8, 28, 24, BODY_COLOR);
-
-    // Lens: light ring with a dark core, centered inside the body.
-    fill_circle(&mut img, 16.5, 16.0, 6.5, LENS_RING_COLOR);
-    fill_circle(&mut img, 16.5, 16.0, 3.5, LENS_CORE_COLOR);
-
-    img.into_raw()
-}
-
-/// Fill an inclusive pixel rectangle.
-fn fill_rect(
-    img: &mut image::ImageBuffer<image::Rgba<u8>, Vec<u8>>,
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
-    color: [u8; 4],
-) {
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            img.put_pixel(x, y, image::Rgba(color));
-        }
-    }
-}
-
-/// Fill a circle of the given radius around `(cx, cy)` (pixel-center test).
-fn fill_circle(
-    img: &mut image::ImageBuffer<image::Rgba<u8>, Vec<u8>>,
-    cx: f32,
-    cy: f32,
-    radius: f32,
-    color: [u8; 4],
-) {
-    let r2 = radius * radius;
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            if dx * dx + dy * dy <= r2 {
-                img.put_pixel(x, y, image::Rgba(color));
-            }
-        }
-    }
+/// Tray icon source: decode the embedded app-icon asset (`icons::APP_ICON_PNG`,
+/// 128×128 RGBA PNG) into the buffer + dimensions `Icon::from_rgba` expects.
+/// Failure mode: [`icons::IconsError::IconDecodeError`] when the embedded PNG
+/// bytes are corrupt/undecodable; [`TrayController::new`] maps it to [`Error`]
+/// and the caller continues without a tray.
+fn app_icon_rgba() -> Result<(Vec<u8>, u32, u32), icons::IconsError> {
+    icons::rgba(icons::APP_ICON_PNG)
 }
 
 /// Icon-click mapping: a left-click UP event opens the settings window.
@@ -161,17 +107,19 @@ pub(crate) struct TrayController {
 }
 
 impl TrayController {
-    /// Create the tray icon with the built-in camera glyph and the §4.5 menu.
-    /// Failure modes: icon buffer/menu issues and an unavailable tray backend
-    /// (on Linux ksni: no D-Bus session bus, no registered StatusNotifier
-    /// host). The caller logs the typed error and continues without a tray.
+    /// Create the tray icon from the embedded app-icon asset and the §4.5 menu.
+    /// Failure modes: asset decode (`icons::IconsError`), icon buffer/menu
+    /// issues and an unavailable tray backend (on Linux ksni: no D-Bus session
+    /// bus, no registered StatusNotifier host). The caller logs the typed
+    /// error and continues without a tray.
     pub(crate) fn new() -> Result<Self, Error> {
         fn unavailable(message: String) -> Error {
             Error::TrayUnavailable { message }
         }
 
-        let icon = Icon::from_rgba(camera_glyph_rgba(), ICON_SIZE, ICON_SIZE)
-            .map_err(|err| unavailable(err.to_string()))?;
+        let (rgba, width, height) = app_icon_rgba().map_err(|err| unavailable(err.to_string()))?;
+        let icon =
+            Icon::from_rgba(rgba, width, height).map_err(|err| unavailable(err.to_string()))?;
 
         let menu = Menu::new();
         menu.append(&MenuItem::with_id(

@@ -1,36 +1,45 @@
 use super::*;
 
-fn pixel(rgba: &[u8], x: usize, y: usize) -> [u8; 4] {
-    let i = (y * 32 + x) * 4;
+/// Read one RGBA pixel from a row-major buffer of the given width.
+fn pixel(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+    let i = (y * width + x) * 4;
     [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
 }
 
-fn luminance(pixel: [u8; 4]) -> u32 {
-    (pixel[0] as u32) + (pixel[1] as u32) + (pixel[2] as u32)
+#[test]
+fn app_icon_rgba_embedded_asset_decodes_to_128x128_rgba() {
+    // The tray icon source is the embedded app-icon asset, not a procedural
+    // glyph: decode must yield exactly 128x128 RGBA (Icon::from_rgba contract).
+    let (rgba, width, height) = app_icon_rgba().expect("embedded app icon must decode");
+    assert_eq!((width, height), (128, 128));
+    assert_eq!(rgba.len(), 128 * 128 * 4);
 }
 
 #[test]
-fn camera_glyph_is_32x32_with_nonempty_pixels() {
-    let rgba = camera_glyph_rgba();
-    assert_eq!(rgba.len(), 32 * 32 * 4);
-    assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
+fn app_icon_rgba_embedded_asset_corners_are_transparent() {
+    let (rgba, width, height) = app_icon_rgba().expect("embedded app icon must decode");
+    let corners = [
+        (0usize, 0usize),
+        (width as usize - 1, 0),
+        (0, height as usize - 1),
+        (width as usize - 1, height as usize - 1),
+    ];
+    for (x, y) in corners {
+        assert_eq!(
+            pixel(&rgba, width as usize, x, y)[3],
+            0,
+            "corner {x},{y} must be transparent"
+        );
+    }
 }
 
 #[test]
-fn camera_glyph_has_lens_darker_than_body() {
-    let rgba = camera_glyph_rgba();
-    let lens = pixel(&rgba, 16, 16);
-    let body = pixel(&rgba, 25, 20);
-    assert_eq!(lens[3], 255, "lens core must be opaque");
-    assert_eq!(body[3], 255, "body must be opaque");
-    assert!(luminance(lens) < luminance(body));
-}
-
-#[test]
-fn camera_glyph_background_is_transparent() {
-    let rgba = camera_glyph_rgba();
-    assert_eq!(pixel(&rgba, 0, 0), [0, 0, 0, 0]);
-    assert_eq!(pixel(&rgba, 31, 31), [0, 0, 0, 0]);
+fn app_icon_rgba_embedded_asset_has_opaque_pixels() {
+    let (rgba, _width, _height) = app_icon_rgba().expect("embedded app icon must decode");
+    assert!(
+        rgba.as_chunks::<4>().0.iter().any(|p| p[3] == 255),
+        "app icon must contain fully opaque pixels"
+    );
 }
 
 #[test]

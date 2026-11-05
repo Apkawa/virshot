@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Warning icon: rounded-corner warning triangle with a black
+       exclamation mark, for use in gui.rs. Palette: fill #F0B429, border
+       and mark #181818 (same black as the app icon lens core). No
+       background rect: the corners stay transparent so the rasterized PNG
+       keeps alpha. -->
+  <!-- Triangle. stroke-linejoin="round" rounds the three corners; the
+       border stroke is drawn on the same path as the fill, so the yellow
+       area is inset by half the stroke width. -->
+  <path d="M64 22 L14 106 L114 106 Z" fill="#F0B429" stroke="#181818" stroke-width="8" stroke-linejoin="round"/>
+  <!-- Exclamation mark, centered on x=64 and placed low enough to sit
+       inside the triangle (its centroid is below the bbox center). Kept
+       clear of the black border. -->
+  <rect x="59" y="46" width="10" height="34" rx="5" fill="#181818"/>
+  <circle cx="64" cy="92" r="6" fill="#181818"/>
+</svg>

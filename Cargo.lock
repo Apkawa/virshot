@@ -1624,6 +1624,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "icons"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "image",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4041,6 +4051,7 @@ dependencies = [
  "egui",
  "gamepad",
  "global-hotkey",
+ "icons",
  "image",
  "overlay",
  "rfd",

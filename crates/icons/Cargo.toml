@@ -1,0 +1,18 @@
+[package]
+name = "icons"
+version = "0.1.0"
+edition = "2024"
+
+# Embedded icon assets for virshot: SVG sources are rasterized to PNG by
+# scripts/gen-icons.sh (external rsvg-convert CLI) and compiled into the
+# binary via include_bytes!. Versions are already locked in Cargo.lock —
+# no new crates.io entries.
+[dependencies]
+egui = "0.37"
+image = { version = "0.25", default-features = false, features = ["png"] }
+thiserror = "2"
+
+# Dev-only: eframe mirrors the root manifest (x11/wayland are unix-only,
+# needed for Linux example runs and not pulled on windows-gnu).
+[dev-dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }

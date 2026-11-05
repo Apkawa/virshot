@@ -23,8 +23,10 @@
 //!   does NOT cancel, eframe shuts down, `run_native` returns, the process
 //!   exits 0. X-close still hides only.
 //! - `NativeOptions::viewport` (`ViewportBuilder`): `with_title`,
-//!   `with_inner_size` (720×520 per §4.4); decorations/resizable are the OS
-//!   defaults (bordered, resizable window).
+//!   `with_inner_size` (720×520 per §4.4), and `with_icon(Arc<IconData>)` —
+//!   attached at creation, since Windows captures `ICON_BIG` there (eframe's
+//!   `AppTitleIconSetter`); decorations/resizable are the OS defaults
+//!   (bordered, resizable window).
 //! - Widgets: `ComboBox::from_label/from_id_salt(...).selected_text(...).show_ui`,
 //!   `ui.selectable_value`, `ui.checkbox`, `ui.text_edit_singleline`,
 //!   `DragValue::range`, `ui.add_enabled(false, ...)` for disabled rows.
@@ -40,11 +42,15 @@
 //!   `min_width`); `Response::on_hover_text(self, text) -> Self` consumes the
 //!   response; and its tooltip is NOT shown on a disabled widget — the disabled
 //!   rect row needs `Response::on_disabled_hover_text` instead.
-//! - Icon glyphs: with our eframe features (`default_fonts`, no
+//! - Status icons: with our eframe features (`default_fonts`, no
 //!   `monochrome_emoji_fonts`) the bundled fonts are Ubuntu-Light + Hack +
 //!   egui-icons (5 logo glyphs only), and none of them contains `⚠`/`ℹ`
-//!   (checked the cmaps), so status icons are colored ASCII `!`/`i` via
-//!   `RichText::color`.
+//!   (checked the cmaps). The warning icon is therefore the embedded
+//!   triangle texture (`icons::WARNING_ICON_PNG`, decoded via
+//!   `icons::rgba` — egui 0.37 core has no PNG loader, same shape as
+//!   `crates/overlay/src/content.rs`), uploaded once at window creation;
+//!   a decode failure logs and the row falls back to the colored ASCII
+//!   `!`. The info icon stays a colored ASCII `i` via `RichText::color`.
 //! - Bind-by-press reads `ui.input(|i| i.events())` `Event::Key` presses
 //!   (spec §4.4: click field → capture mode); Escape cancels capture mode;
 //!   unsupported names are ignored. While capturing, live hotkey registrations
@@ -281,6 +287,11 @@ const BIND_BUTTON_MIN_WIDTH: f32 = 170.0;
 const WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(246, 118, 100);
 const INFO_COLOR: egui::Color32 = egui::Color32::from_rgb(118, 176, 240);
 
+/// Painted size of the warning triangle in a status row, in logical points.
+/// The SAME slot is reserved for the ASCII `!` fallback so the label after
+/// the icon never jumps between the texture and the fallback rendering.
+const WARNING_ICON_SIZE: f32 = 16.0;
+
 /// Tab identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
@@ -451,6 +462,8 @@ pub(crate) fn icon_for_status(status: &Registration) -> Option<StatusIcon> {
 /// Glyph for an icon kind. `⚠`/`ℹ` are NOT in egui's bundled fonts (checked
 /// the locked cmaps), so the icons are colored ASCII letters — the colors carry
 /// the meaning, the letter keeps the shape unambiguous without a symbol font.
+/// The warning icon renders as the embedded triangle texture when it loaded;
+/// this glyph is its fallback.
 fn icon_glyph(kind: IconKind) -> &'static str {
     match kind {
         IconKind::Warning => "!",
@@ -464,6 +477,42 @@ fn icon_color(kind: IconKind) -> egui::Color32 {
         IconKind::Warning => WARNING_COLOR,
         IconKind::Info => INFO_COLOR,
     }
+}
+
+/// Decode the embedded warning-triangle asset into a straight-alpha egui
+/// color image. egui 0.37 core has no PNG loader, so the bytes go through
+/// `icons::rgba` (precedent: `crates/overlay/src/content.rs` and
+/// `crates/icons/examples/icons_gallery.rs`).
+///
+/// Failure mode: [`icons::IconsError`] on invalid or corrupt PNG bytes —
+/// logged at WARN (this runs once, at window creation) and `None`, so
+/// status rows fall back to the ASCII `!` glyph and never lose their marker.
+fn warning_color_image() -> Option<egui::ColorImage> {
+    match icons::rgba(icons::WARNING_ICON_PNG) {
+        Ok((rgba, width, height)) => Some(egui::ColorImage::from_rgba_unmultiplied(
+            [width as usize, height as usize],
+            &rgba,
+        )),
+        Err(err) => {
+            tracing::warn!(
+                "Warning icon decode failed: {err}; status rows fall back to the \"!\" glyph"
+            );
+            None
+        }
+    }
+}
+
+/// Upload the decoded warning asset as a texture (`Context::load_texture`)
+/// ONCE, in the eframe `create` closure — the same shape the gallery example
+/// uses. `None` when the decode failed (see [`warning_color_image`]).
+fn warning_icon_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    warning_color_image().map(|image| {
+        ctx.load_texture(
+            "virshot-warning-icon",
+            image,
+            egui::TextureOptions::default(),
+        )
+    })
 }
 
 /// Whether the draft differs from the applied settings (Apply button hint;
@@ -528,6 +577,11 @@ pub(crate) struct SettingsApp {
     /// Tray controller (spec §4.5, Stage 10); `None` when the tray failed to
     /// start (typed error logged by main). Polled in `logic`.
     tray: Option<TrayController>,
+    /// Warning status icon: the embedded triangle texture uploaded once in
+    /// `run`'s create closure (`warning_icon_texture`). `None` when the asset
+    /// decode failed (logged at WARN) — warning rows then paint the ASCII
+    /// `!` glyph in the same reserved slot.
+    warning_icon: Option<egui::TextureHandle>,
     /// Set by the tray `Exit` action only (spec §4.5): the next close request
     /// is not cancelled, so eframe shuts down.
     exit_requested: bool,
@@ -563,6 +617,7 @@ impl SettingsApp {
             overlay_host,
             handoff,
             tray,
+            warning_icon: None,
             exit_requested: false,
         }
     }
@@ -886,18 +941,54 @@ impl SettingsApp {
                             }
 
                             if let Some(icon) = icon {
-                                let glyph = ui.label(
-                                    egui::RichText::new(icon_glyph(icon.kind))
-                                        .color(icon_color(icon.kind))
-                                        .strong(),
-                                );
+                                // Warning rows paint the embedded triangle
+                                // texture when it loaded; otherwise the ASCII
+                                // `!` is painted into the SAME allocated slot,
+                                // so the row layout never jumps between the
+                                // texture and the fallback. Info stays a
+                                // colored `i` label.
+                                let response = if icon.kind == IconKind::Warning {
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::Vec2::splat(WARNING_ICON_SIZE),
+                                        egui::Sense::hover(),
+                                    );
+                                    match &self.warning_icon {
+                                        Some(texture) => {
+                                            ui.painter().image(
+                                                texture.id(),
+                                                rect,
+                                                egui::Rect::from_min_max(
+                                                    egui::Pos2::ZERO,
+                                                    egui::pos2(1.0, 1.0),
+                                                ),
+                                                egui::Color32::WHITE,
+                                            );
+                                        }
+                                        None => {
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                icon_glyph(icon.kind),
+                                                egui::FontId::default(),
+                                                icon_color(icon.kind),
+                                            );
+                                        }
+                                    }
+                                    response
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new(icon_glyph(icon.kind))
+                                            .color(icon_color(icon.kind))
+                                            .strong(),
+                                    )
+                                };
                                 // `on_hover_text` is silent on disabled
                                 // widgets (egui 0.37), and the reserved rect
                                 // row renders disabled.
                                 if reserved {
-                                    glyph.on_disabled_hover_text(icon.tooltip);
+                                    response.on_disabled_hover_text(icon.tooltip);
                                 } else {
-                                    glyph.on_hover_text(icon.tooltip);
+                                    response.on_hover_text(icon.tooltip);
                                 }
                             }
                         });
@@ -1158,6 +1249,24 @@ fn host_monitor_rects(cc: &eframe::CreationContext<'_>) -> (Vec<overlay::Monitor
     )
 }
 
+/// Window-icon source for `ViewportBuilder::with_icon`: decode the embedded
+/// app-icon asset (`icons::APP_ICON_PNG`) into `egui::IconData`. The icon is
+/// attached at WINDOW CREATION because Windows captures `ICON_BIG` there
+/// (eframe's `AppTitleIconSetter`); a runtime `set_icon` alone is not enough.
+///
+/// Failure mode: [`icons::IconsError::IconDecodeError`] on a corrupt asset —
+/// logged at WARN and the window opens iconless (errors are values; the app
+/// stays alive).
+fn app_window_icon() -> Option<Arc<egui::IconData>> {
+    match icons::icon_data(icons::APP_ICON_PNG) {
+        Ok(data) => Some(Arc::new(data)),
+        Err(err) => {
+            tracing::warn!("App window icon decode failed: {err}; window opens without an icon");
+            None
+        }
+    }
+}
+
 /// Open the settings window on the MAIN thread (the hotkey manager lives
 /// there; winit/eframe pumps Win32 messages — Windows WM_HOTKEY affinity;
 /// tray event handling here satisfies the main-thread affinity every backend
@@ -1184,13 +1293,21 @@ pub(crate) fn run(
     settings_mailbox: Arc<Mutex<Settings>>,
     pad_capture: PadCaptureMailbox,
 ) -> Result<(), Error> {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("virshot — Settings")
+        .with_inner_size([INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT])
+        // eframe derives the alpha-capable GL config from the ROOT viewport
+        // builder; the toast child viewports need it to be transparent.
+        .with_transparent(true);
+    // The window icon must be attached HERE (creation): Windows captures
+    // ICON_BIG at that point (eframe's AppTitleIconSetter). A decode failure
+    // is logged and the window opens iconless.
+    let viewport = match app_window_icon() {
+        Some(icon) => viewport.with_icon(icon),
+        None => viewport,
+    };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("virshot — Settings")
-            .with_inner_size([INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT])
-            // eframe derives the alpha-capable GL config from the ROOT viewport
-            // builder; the toast child viewports need it to be transparent.
-            .with_transparent(true),
+        viewport,
         ..Default::default()
     };
 
@@ -1220,7 +1337,12 @@ pub(crate) fn run(
                 "Toast service started on {} monitor(s)",
                 host.monitors().len()
             );
-            Ok(Box::new(SettingsApp::new(
+            // Warning status icon: decode + upload the embedded asset ONCE
+            // here (window creation), not per frame — egui 0.37 has no PNG
+            // loader, so the bytes go through `icons::rgba` and
+            // `Context::load_texture`. A decode failure is logged once and
+            // the rows keep the ASCII `!` fallback.
+            let mut app = SettingsApp::new(
                 config_path,
                 settings,
                 controller,
@@ -1231,7 +1353,9 @@ pub(crate) fn run(
                 tray,
                 settings_mailbox,
                 pad_capture,
-            )))
+            );
+            app.warning_icon = warning_icon_texture(&cc.egui_ctx);
+            Ok(Box::new(app))
         }),
     )
     .map_err(|err| Error::Gui {
