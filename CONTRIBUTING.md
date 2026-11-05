@@ -30,7 +30,9 @@ cargo test                                            # linux: build + unit test
 cargo build --release --target x86_64-pc-windows-gnu  # windows release exe
 cargo test --no-run --target x86_64-pc-windows-gnu    # windows: compile tests (run on Windows)
 ./scripts/check.sh                                    # gate: check + test + clippy, no formatting
+SKIP_E2E=1 ./scripts/check.sh                         # same gate, e2e compiled but not run (pre-commit uses this)
 ./scripts/check_full.sh                               # gate above + cargo fmt + fmt --check
+./cargo.sh test --test e2e                            # e2e only: drives the built binary
 ./scripts/cratedoc.sh xcap::Monitor                   # crate API docs as markdown
 ```
 

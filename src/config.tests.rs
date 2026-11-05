@@ -8,12 +8,9 @@ fn settings_defaults_match_spec_section_7() {
     // `settings_default_save_path_matches_the_home_resolved_value`.
     assert_eq!(
         settings.general.file_full_screen,
-        "FullScreen/%y-%mo/%y-%mo-%d/%iso.%ext"
+        "FullScreen/%y-%mo/%iso.%ext"
     );
-    assert_eq!(
-        settings.general.file_window,
-        "%t/%y-%mo/%y-%mo-%d/%t-%iso.%ext"
-    );
+    assert_eq!(settings.general.file_window, "%t/%y-%mo/%t-%iso.%ext");
     assert_eq!(settings.general.format, Format::Png);
     assert_eq!(settings.general.jpeg_quality, 90);
     assert_eq!(settings.general.webp_quality, 90);
@@ -303,10 +300,10 @@ fn resolve_home_missing_returns_none() {
 }
 
 #[test]
-fn default_save_path_appends_pictures_screenshots() {
+fn default_save_path_appends_pictures_virshot() {
     let path = default_save_path(Some(Path::new("/home/u")));
 
-    assert_eq!(normalised(&path), "/home/u/Pictures/Screenshots");
+    assert_eq!(normalised(&path), "/home/u/Pictures/ViRShot");
 }
 
 #[test]
@@ -314,7 +311,7 @@ fn default_save_path_falls_back_without_home() {
     let path = default_save_path(None);
 
     assert!(path.is_relative(), "no home must give a cwd-relative path");
-    assert_eq!(normalised(&path), "Pictures/Screenshots");
+    assert_eq!(normalised(&path), "Pictures/ViRShot");
 }
 
 #[test]
@@ -326,7 +323,7 @@ fn default_config_save_path_is_home_resolved() {
 
     assert_eq!(
         normalised(Path::new(&settings.general.save_path)),
-        "/home/u/Pictures/Screenshots"
+        "/home/u/Pictures/ViRShot"
     );
     // Everything else still follows spec §7.
     assert_eq!(settings.general.format, Format::Png);
@@ -350,8 +347,8 @@ fn settings_default_save_path_matches_the_home_resolved_value() {
             .to_string()
     );
     assert!(
-        normalised(Path::new(&settings.general.save_path)).ends_with("/Pictures/Screenshots"),
-        "default save path must end with Pictures/Screenshots: {}",
+        normalised(Path::new(&settings.general.save_path)).ends_with("/Pictures/ViRShot"),
+        "default save path must end with Pictures/ViRShot: {}",
         settings.general.save_path
     );
 }

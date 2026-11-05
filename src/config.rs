@@ -316,16 +316,16 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     resolve_home(|name| std::env::var(name).ok())
 }
 
-/// Spec §7 default save path: `<home>/Pictures/Screenshots` (Windows
-/// `%USERPROFILE%\Pictures\Screenshots`, Linux `~/Pictures/Screenshots`).
+/// Spec §7 default save path: `<home>/Pictures/ViRShot` (Windows
+/// `%USERPROFILE%\Pictures\ViRShot`, Linux `~/Pictures/ViRShot`).
 /// With no home directory the path stays cwd-relative
-/// (`Pictures/Screenshots`), like [`FALLBACK_CONFIG_DIR`] does for the config
+/// (`Pictures/ViRShot`), like [`FALLBACK_CONFIG_DIR`] does for the config
 /// file: startup still has a writable place rather than a fake absolute path,
 /// and `capture` creates the directory on the first save.
 pub(crate) fn default_save_path(home: Option<&Path>) -> PathBuf {
     match home {
-        Some(home) => home.join("Pictures").join("Screenshots"),
-        None => PathBuf::from(FALLBACK_SAVE_DIR).join("Screenshots"),
+        Some(home) => home.join("Pictures").join("ViRShot"),
+        None => PathBuf::from(FALLBACK_SAVE_DIR).join("ViRShot"),
     }
 }
 
@@ -421,8 +421,8 @@ impl Default for General {
 fn general_with_home(home: Option<&Path>) -> General {
     General {
         save_path: default_save_path(home).display().to_string(),
-        file_full_screen: "FullScreen/%y-%mo/%y-%mo-%d/%iso.%ext".to_owned(),
-        file_window: "%t/%y-%mo/%y-%mo-%d/%t-%iso.%ext".to_owned(),
+        file_full_screen: "FullScreen/%y-%mo/%iso.%ext".to_owned(),
+        file_window: "%t/%y-%mo/%t-%iso.%ext".to_owned(),
         format: Format::Png,
         jpeg_quality: 90,
         webp_quality: 90,

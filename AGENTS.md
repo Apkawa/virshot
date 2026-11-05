@@ -22,10 +22,16 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   `cargo fmt` (rewrites files) and `cargo fmt --check`. Run it before committing
   and at task/stage boundaries, not on every iteration.
 - **Git hooks run the pre-commit gate:**
-  `./scripts/check.sh && ./cargo.sh fmt && git add -u . && ./cargo.sh fmt --check`
+  `SKIP_E2E=1 ./scripts/check.sh && ./cargo.sh fmt && git add -u . && ./cargo.sh fmt --check`
   (wired via `rusty-hook` in `.rusty-hook.toml`; the chain must pass before a commit
   lands). Formatting happens at commit time only: day-to-day iteration uses
   `./scripts/check.sh`, so files do not churn between edit batches.
+- **`SKIP_E2E=1` keeps the commit gate fast:** the `tests/e2e` target drives the
+  built binary, which can park forever on a host without a usable display. With
+  the flag the e2e target is still compiled, but its tests are filtered out
+  (`cargo test -- --skip 'cli_headless::'`), so only the unit tests run. The full
+  e2e run happens at task/stage boundaries with plain `./scripts/check.sh` or
+  `./cargo.sh test --test e2e`.
 - **Commit messages follow Conventional Commits** (`type(scope): description`,
   e.g. `feat(poc): ...`). No linter enforces this yet — keep it by convention.
 

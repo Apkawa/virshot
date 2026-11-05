@@ -133,15 +133,15 @@ fn cli_shot_without_display_exits_one_and_records_failure_in_log() {
     );
     // Stage 14 shipped behavior (spec §7 v5.0): the default `save_path` is
     // resolved from the home directory, not a hardcoded literal, so the
-    // auto-created file ends with the Pictures/Screenshots suffix. Checked
+    // auto-created file ends with the Pictures/ViRShot suffix. Checked
     // separator-agnostically so the assertion holds on Windows too.
     let save_path_line = config_text
         .lines()
         .find(|line| line.trim_start().starts_with("save_path"))
         .expect("auto-created config must carry a save_path line");
     assert!(
-        save_path_line.contains("Pictures") && save_path_line.ends_with("Screenshots\""),
-        "save_path must be the home-resolved Pictures/Screenshots: {save_path_line}"
+        save_path_line.contains("Pictures") && save_path_line.ends_with("ViRShot\""),
+        "save_path must be the home-resolved Pictures/ViRShot: {save_path_line}"
     );
 
     let log_text = std::fs::read_to_string(&log).expect("log file must exist");
