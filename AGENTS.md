@@ -7,9 +7,8 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
 
 - **One module = one file.** Each module lives in its own file under `src/`
   (`src/main.rs` only wires things together: CLI entry, event loop, module wiring).
-  A file declares exactly one module; tests for a module go into that file's
-  `#[cfg(test)] mod tests` or a sibling `src/<module>.tests`-style file — never
-  into an unrelated file.
+  A file declares exactly one module; the tests for that module follow the placement
+  rules in **Testing** — never into an unrelated file.
 
 ## Formatting & pre-commit
 
@@ -32,16 +31,53 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
 
 ## Testing
 
-- **Unit tests: TDD.** Write the failing test first, implement to green, refactor.
-  Unit tests cover pure logic only: filename templates, sanitization, config
-  parsing/defaults, path validation. No real gamepad, no real screen capture.
-- **E2E tests: no TDD.** They fix already-implemented functionality as regression
-  tests: run the built binary headless (`virshot shot`), assert a real file is
-  written and valid. Place them in `tests/`. Do not design E2E up front; record
-  functionality once it ships.
-- All tests must pass on both targets: `./scripts/check.sh` (linux; its `test` step) and
-  `./cargo.sh test --no-run --target x86_64-pc-windows-gnu` (windows-gnu compiles;
-  execution of Windows test binaries happens on Windows hosts).
+Placement follows the **visibility of the code under test**, never convenience.
+
+- **Public API → integration tests:** `crates/<crate>/tests/<area>.rs` for library
+  crates, `tests/unit/<area>.rs` for the root crate. Such a test pins the contract,
+  not the implementation. `tests/unit/` needs a `lib` target on the root package;
+  while `virshot` is bin-only nothing can import it, so its unit tests stay in the
+  sibling files below.
+- **Private / `pub(crate)` internals → sibling `<module>.tests.rs`**, attached at the
+  **end** of the module file: `use super::*` reaches the private items, and
+  `cfg(test)` keeps the file out of the shipped binary.
+
+  ```rust
+  #[cfg(test)]
+  #[path = "capture.tests.rs"]
+  mod tests;
+  ```
+
+  An inline `#[cfg(test)] mod tests { … }` is allowed only for a handful of trivial
+  assertions.
+- **E2E / regression tests → `tests/e2e/`** (`tests/e2e/cli_headless.rs`). They drive
+  the built binary, not the crate API, and share no fixtures with unit tests.
+- **Cargo target rule:** a directory under `tests/` becomes a test target only through
+  its `main.rs`; a plain `.rs` file directly under `tests/` or `crates/*/tests/` is a
+  target on its own. So a directory needs `main.rs` declaring one module per area:
+
+  ```rust
+  mod cli_headless;
+  ```
+
+- **One test file per module**; fixtures stay inside it, no shared test-harness crate.
+
+- **Unit tests: TDD.** Failing test first, implement to green, refactor. Pure logic
+  only — filename templates, sanitization, config parsing/defaults, path validation.
+  No real gamepad, no real screen capture; time and randomness are injected (see
+  *Rust Best Practices*), so assertions are deterministic.
+- **E2E tests: no TDD.** They lock functionality that already shipped: run the built
+  binary headless (`virshot shot`), assert a real file is written and valid. Never
+  designed up front.
+- **Naming:** `<unit>_<scenario>_<expectation>`.
+
+- **Linux gate:** `./scripts/check.sh` runs `cargo test` on the root package only.
+  Crate tests: `./cargo.sh test -p overlay -p toast`, standalone
+  `cd crates/<crate> && ../../cargo.sh test`, or `./cargo.sh test --workspace` at
+  task/stage boundaries.
+- **Windows gate:** `./cargo.sh test --no-run --target x86_64-pc-windows-gnu` compiles
+  the test binaries; execution happens on Windows hosts, including `crates/gamepad`
+  behind `#[cfg(windows)]`.
 
 ## Safety
 
