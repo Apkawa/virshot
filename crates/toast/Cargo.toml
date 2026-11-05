@@ -1,0 +1,18 @@
+[package]
+name = "toast"
+version = "0.1.0"
+edition = "2024"
+
+# Toast notification library on top of `overlay` (overlay/toast plan Stage 1
+# skeleton; the implementation lands in Stage 3). Versions are the ones already
+# locked in Cargo.lock — no new crates.io entries.
+[dependencies]
+overlay = { path = "../overlay" }
+egui = "0.37"
+thiserror = "2"
+
+# Dev-only: eframe mirrors the root manifest (x11/wayland are unix-only, needed
+# for Linux example runs and not pulled on windows-gnu); image for icon assets.
+[dev-dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

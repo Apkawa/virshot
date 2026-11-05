@@ -61,85 +61,53 @@
 //!   in memory and shown beside the field; on a host without GameInput the
 //!   field renders as a disabled placeholder (Linux gilrs is out of scope).
 //!
-//! Overlay toast viewport (spec §4.3, Stage 9): the `overlay::ToastState`
-//! lifecycle is driven from `logic` — so toasts appear even while the settings
-//! window is hidden — and painted into a second deferred viewport: transparent,
-//! undecorated, always-on-top, mouse-passthrough, faded via
-//! `Color32::gamma_multiply`. Verified against the locked egui/eframe/
-//! egui-winit/winit 0.37 sources, not from memory:
-//! - `Context::show_viewport_deferred(id, builder, cb)` must be called on every
-//!   pass while the toast exists; builder diffs become viewport commands
-//!   (`OuterPosition`, `InnerSize`, `Decorations`, `MousePassthrough`,
-//!   `WindowLevel`) via `ViewportBuilder::patch`.
-//! - `ViewportBuilder::with_always_on_top()` (no argument) maps to winit
-//!   `set_window_level(AlwaysOnTop)`; `with_mouse_passthrough(true)` maps to
-//!   `set_cursor_hittest(false)`.
-//! - Transparency: eframe requests an alpha-capable GL config from the ROOT
-//!   viewport builder (`native_options.viewport.transparent`) and shares one
-//!   clear color across viewports, so `App::clear_color` returns alpha 0 and the
-//!   settings window keeps its opaque `CentralPanel` paint.
-//! - Platform limits: Wayland ignores `set_outer_position` (the compositor
-//!   places the window) and `set_window_level` (no always-on-top); passthrough
-//!   works there via an empty input region; X11 transparency is set at window
-//!   build time.
-//! - egui 0.37 exposes no monitor enumeration to `App` — only
-//!   `ViewportInfo::monitor_size` for the CURRENT monitor (`None` on Wayland),
-//!   so per-monitor placement (spec §4.3 v5.5, `overlay.on_all_monitors`) uses
-//!   `xcap::Monitor::all()` on the MAIN thread at toast time — never in the
-//!   capture hot path. `xcap` reports PHYSICAL pixels; the toast builder takes
-//!   LOGICAL points (egui-winit multiplies builder position/size by
-//!   `pixels_per_point`), so physical ÷ `scale_factor` feeds `toast_positions`.
-//!   A monitor whose accessors fail is skipped; a total failure or an empty
-//!   list falls back to the egui current-monitor size, then to compositor
-//!   placement (WARN, app stays alive).
-//! - Toast visibility while the settings window is hidden: a deferred viewport
-//!   needs a FULL pass to be created (`ViewportOutput` comes from
-//!   `Context::end_pass`; `run_logic` returns none), so a toast started while
-//!   the window was hidden never appeared. Sending
-//!   `ViewportCommand::RequestPaintWhileHidden` to the root viewport while a
-//!   toast is alive makes eframe run full passes for the hidden window
-//!   (`egui-winit::ActionRequested::PaintWhileHidden` → `wants_paint()`,
-//!   `glow_integration` `is_visible`) — that creates the toast windows and
-//!   drives the fade.
-//! - Toast visibility on the FIRST frame (spec §4.3 v6.0, Stage 21): the chip
-//!   paints at full opacity from its first frame (`overlay::ToastState::alpha`
-//!   fades out only at the end — a fade-in ramp multiplies the alpha channel to
-//!   0 via `Color32::gamma_multiply` and leaves the window empty), and a repaint
-//!   is requested for a toast viewport only once its `ViewportInfo` is in the
-//!   pass input (`viewport_has_window`): the window is created at the END of the
-//!   spawn pass, so a request from that pass finds no window
-//!   (`window_id_from_viewport_id` → `EventResult::Wait`, `run.rs`) AND pins the
-//!   viewport's `repaint_delay` to `ZERO`, which deduplicates every later
-//!   request (`egui/src/context.rs`) — the window then never gets
-//!   `RedrawRequested` and Windows shows its unpainted white background.
-//! - One toast window, no white "shadow" (spec §4.3 v6.1, Stage 21): there is
-//!   only ever ONE window per monitor, and it is never shown unpainted.
-//!   Replacement defers the spawn to the NEXT pass (`toast_window_step`) because
-//!   `handle_viewport_output` creates new windows before `remove_viewports_not_in`
-//!   destroys the closed ones, so a same-pass spawn showed old + new together.
-//!   egui 0.37 has no per-viewport background color (`ViewportBuilder` has no
-//!   inner-color field, `ViewportCommand` has no fill command, so
-//!   `with_inner_color` cannot be used), so instead the toast window is created
-//!   with `with_visible(false)` and painted while hidden —
-//!   `RequestPaintWhileHidden` → `ActionRequested::PaintWhileHidden` →
-//!   `wants_paint()` makes `glow_integration` paint it and run its callback —
-//!   and is shown with `ViewportCommand::Visible(true)` only after that callback
-//!   ran. `with_active(false)` keeps the show non-activating
-//!   (`SW_SHOWNOACTIVATE` in winit), and `with_always_on_top()` maps to winit
-//!   `WindowAttributes::with_window_level(AlwaysOnTop)` → `WS_EX_TOPMOST`
-//!   (`egui-winit create_winit_window_attributes`, `winit window_state.rs`).
+//! Toast plumbing (spec §4.3, Stage 4): this window OWNS the toast stack —
+//! `overlay::OverlayHost` (crates/overlay host-loop backend) and
+//! `toast::ToastService` (crates/toast timer thread) are created in the eframe
+//! `create` closure of `run`; trigger threads reach the chips through the
+//! handle slot (`capture::ToastHandoff`) filled here. The host paints each chip
+//! as a child egui viewport on this loop: transparent, undecorated,
+//! always-on-top, mouse-passthrough, content-protected, hidden until its first
+//! paint, faded out at the end — the crate builds and commands the viewports,
+//! this module no longer reimplements any of it. Verified against the locked
+//! egui/eframe 0.37 sources, not from memory:
+//! - `Context::show_viewport_deferred` only writes viewport output, so
+//!   `OverlayHost::update(&ctx)` is valid from `App::logic` on BOTH passes:
+//!   a visible root runs `logic` inside the ui pass, and a hidden/minimized
+//!   root runs `Context::run_logic` (`eframe epi_integration`), whose
+//!   `LogicOutput` carries platform output and viewport commands for ALL
+//!   viewports — so chips still spawn, paint, and fade while the settings
+//!   window is hidden.
+//! - Monitor rects are PHYSICAL desktop pixels with each monitor's DPI scale
+//!   attached (`overlay::MonitorRect`), enumerated once through
+//!   `overlay::monitors` — the crate's single source of truth for monitor
+//!   geometry; this module only wires it and logs — because `OverlayHost`
+//!   converts a rect with the CHILD window's own pixels-per-point
+//!   (`crates/overlay/src/host.rs`) — the root window's scale belongs to the
+//!   settings window, not to a chip. `xcap` stays capture-only. The PRIMARY
+//!   monitor comes FIRST — toast `MonitorSel::Index(0)` means primary (spec
+//!   §4.3); `overlay::monitors` flags the OS primary monitor. A monitor with
+//!   no usable size is skipped (WARN); with no monitor geometry at all the
+//!   app falls back to the host window's own physical rect, and an empty list
+//!   makes the service log and skip chips (the app stays alive).
+//! - `ToastService::spawn(..., wake = Some(ctx.clone()))` wakes this loop for
+//!   fade frames; `TRAY_POLL_TICK` repaints keep the host loop fed while idle.
+//! - Drop order: `toast_service` is declared BEFORE `overlay_host`, so the
+//!   service's `Drop` (Quit + join, hides chips) runs while the host is alive.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
+
+use overlay::OverlayHost;
+use toast::ToastService;
 
 use crate::bindings::Action;
 use crate::capture;
+use crate::capture::ToastHandoff;
 use crate::config;
 use crate::config::Binding;
 use crate::config::Format;
@@ -155,10 +123,6 @@ use crate::gamepad::set_capture_mode;
 use crate::gamepad::take_captured;
 use crate::hotkeys::HotkeysController;
 use crate::hotkeys::Registration;
-use crate::overlay::ToastMailbox;
-use crate::overlay::ToastState;
-use crate::overlay::should_show;
-use crate::overlay::take_latest;
 use crate::tray::TrayAction;
 use crate::tray::TrayController;
 
@@ -171,370 +135,6 @@ pub(crate) const INITIAL_WINDOW_HEIGHT: f32 = 520.0;
 /// window is hidden. 500 ms of logic-only ticks keeps idle CPU far under the
 /// §5 budget.
 const TRAY_POLL_TICK: Duration = Duration::from_millis(500);
-
-/// Toast chip metrics (spec §4.3): single line, fixed inset from the screen
-/// corner. Width grows with the message so long error texts still fit.
-const TOAST_HEIGHT: f32 = 36.0;
-const TOAST_MIN_WIDTH: f32 = 220.0;
-const TOAST_MAX_WIDTH: f32 = 460.0;
-/// Empirical corner offsets from the tk reference (`hua_pichot.py`, spec §4.3
-/// v6.2): 30 px from the vertical border, 60 px from the horizontal border.
-/// The bottom corners clear the Windows taskbar (~48 px) without OS work-area
-/// APIs — `windows-sys` `rcWork` was rejected (unsafe FFI vs
-/// `forbid(unsafe_code)`). Logical px, same on all four corners.
-const TOAST_OFFSET_X: f32 = 30.0;
-const TOAST_OFFSET_Y: f32 = 60.0;
-const TOAST_CHAR_WIDTH: f32 = 9.0;
-const TOAST_PADDING: f32 = 26.0;
-
-/// Toast chip colors (English text on a dark chip; faded via `gamma_multiply`).
-const TOAST_FILL: egui::Color32 = egui::Color32::from_rgb(24, 24, 24);
-const TOAST_TEXT: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);
-
-/// Toast viewport id: unique per replacement generation AND per monitor, so a
-/// replacement never reuses a live window (spec §4.3 — one toast replaces the
-/// current one, no stacking).
-fn toast_viewport_id(generation: u64, index: usize) -> egui::ViewportId {
-    egui::ViewportId::from_hash_of(format!("virshot-toast-{generation}-{index}"))
-}
-
-/// One live toast window: its viewport id, where it is placed, and whether it
-/// has been painted at least once. `None` position = let the compositor place
-/// it (Wayland ignores positions anyway). `painted` is set by the window's own
-/// paint callback, so a window is shown only once it has real pixels (see
-/// `SettingsApp::update_toast`).
-#[derive(Debug, Clone)]
-struct ToastViewport {
-    id: egui::ViewportId,
-    position: Option<egui::Pos2>,
-    painted: Arc<AtomicBool>,
-}
-
-/// Whether the backend already has a native window for `id`: eframe reports
-/// every live viewport as a `ViewportInfo` in the pass input
-/// (`glow_integration` fills `raw_input.viewports` from its viewport map), so
-/// an entry here means the window exists.
-///
-/// Repaint bootstrap (spec §4.3 v6.0): a deferred viewport's window is created
-/// at the END of the pass that delivers its builder, while egui fires the
-/// repaint callback inside that same pass. A request from the spawn pass
-/// therefore finds no window (`window_id_from_viewport_id` → `None` →
-/// `EventResult::Wait` in `eframe/src/native/run.rs`) and is dropped — and it
-/// also pins that viewport's `repaint_delay` to `ZERO`, so every later request
-/// is deduplicated away (`egui/src/context.rs`: the callback fires only when
-/// `delay < repaint_delay`). The toast window then never receives
-/// `RedrawRequested` and Windows composites its unpainted white background:
-/// the empty rounded "DWM shadow" strip. Requesting repaint only once the
-/// viewport is in the input lands the first request on a real window.
-fn viewport_has_window(raw: &egui::RawInput, id: egui::ViewportId) -> bool {
-    raw.viewports.contains_key(&id)
-}
-
-/// Toast width from the message text: proportional to the character count,
-/// clamped so a toast never spans the screen.
-pub(crate) fn toast_width(text: &str) -> f32 {
-    (text.chars().count() as f32 * TOAST_CHAR_WIDTH + TOAST_PADDING)
-        .clamp(TOAST_MIN_WIDTH, TOAST_MAX_WIDTH)
-}
-
-/// Toast window size: chip width from the text, fixed chip height.
-fn toast_window_size(text: &str) -> egui::Vec2 {
-    egui::Vec2::new(toast_width(text), TOAST_HEIGHT)
-}
-
-/// Top-left corner of the toast for a screen-corner placement (spec §4.3 v6.2:
-/// four corners with the empirical 30/60 offsets). `None` when the monitor
-/// size is unknown — on Wayland egui reports no monitor size and the
-/// compositor places the window.
-pub(crate) fn toast_position(
-    monitor_size: Option<egui::Vec2>,
-    position: OverlayPosition,
-    size: egui::Vec2,
-) -> Option<egui::Pos2> {
-    let monitor = monitor_size?;
-    let left = match position {
-        OverlayPosition::TopLeft | OverlayPosition::BottomLeft => TOAST_OFFSET_X,
-        OverlayPosition::TopRight | OverlayPosition::BottomRight => {
-            monitor.x - size.x - TOAST_OFFSET_X
-        }
-    };
-    let top = match position {
-        OverlayPosition::TopLeft | OverlayPosition::TopRight => TOAST_OFFSET_Y,
-        OverlayPosition::BottomLeft | OverlayPosition::BottomRight => {
-            monitor.y - size.y - TOAST_OFFSET_Y
-        }
-    };
-    Some(egui::Pos2::new(left.max(0.0), top.max(0.0)))
-}
-
-/// One monitor, in LOGICAL points, for toast placement (spec §4.3 v5.5).
-/// `xcap` reports PHYSICAL pixels; egui viewport positions/sizes are logical
-/// points that egui-winit scales by the window's pixels-per-point
-/// (`apply_viewport_builder_to_window`), so physical ÷ scale factor is what the
-/// builder expects. A local struct (not `xcap::Monitor`) because the helper is
-/// pure and unit-testable — `xcap::Monitor` has no public constructor.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct MonitorRect {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) width: f32,
-    pub(crate) height: f32,
-    pub(crate) primary: bool,
-}
-
-/// Toast placements (spec §4.3 v5.5): `on_all_monitors` → one placement per
-/// monitor at the same corner; otherwise ONE placement on the primary monitor
-/// (or the first when no monitor is marked primary). Empty input → empty result
-/// (caller falls back to a compositor-placed toast).
-pub(crate) fn toast_positions(
-    monitors: &[MonitorRect],
-    corner: OverlayPosition,
-    size: egui::Vec2,
-    offset_x: f32,
-    offset_y: f32,
-    on_all_monitors: bool,
-) -> Vec<egui::Pos2> {
-    let chosen: Vec<MonitorRect> = if on_all_monitors {
-        monitors.to_vec()
-    } else if let Some(primary) = monitors.iter().find(|monitor| monitor.primary) {
-        vec![*primary]
-    } else {
-        monitors.iter().take(1).copied().collect()
-    };
-
-    chosen
-        .iter()
-        .map(|monitor| corner_position(*monitor, corner, size, offset_x, offset_y))
-        .collect()
-}
-
-/// Top-left of a toast anchored at `corner` of `monitor`: inset by `offset_x`
-/// from the monitor's vertical border and `offset_y` from its horizontal
-/// border. A monitor smaller than the toast keeps the toast at the monitor
-/// origin (never pushed further off-monitor by a negative offset); a monitor
-/// with negative desktop coordinates keeps its own negative placement.
-fn corner_position(
-    monitor: MonitorRect,
-    corner: OverlayPosition,
-    size: egui::Vec2,
-    offset_x: f32,
-    offset_y: f32,
-) -> egui::Pos2 {
-    let left = match corner {
-        OverlayPosition::TopLeft | OverlayPosition::BottomLeft => monitor.x + offset_x,
-        OverlayPosition::TopRight | OverlayPosition::BottomRight => {
-            monitor.x + monitor.width - size.x - offset_x
-        }
-    };
-    let top = match corner {
-        OverlayPosition::TopLeft | OverlayPosition::TopRight => monitor.y + offset_y,
-        OverlayPosition::BottomLeft | OverlayPosition::BottomRight => {
-            monitor.y + monitor.height - size.y - offset_y
-        }
-    };
-    egui::Pos2::new(left.max(monitor.x), top.max(monitor.y))
-}
-
-/// Monitor rects in logical points from `xcap` (spec §4.3 geometry). Called on
-/// the MAIN thread when a toast starts — never in the capture hot path. A
-/// monitor whose geometry/accessors fail is skipped; an overall failure is
-/// reported by the caller (WARN + unpositioned fallback toast).
-fn monitor_rects() -> Result<Vec<MonitorRect>, xcap::XCapError> {
-    let mut rects = Vec::new();
-
-    for monitor in xcap::Monitor::all()? {
-        let (Ok(x), Ok(y), Ok(width), Ok(height)) =
-            (monitor.x(), monitor.y(), monitor.width(), monitor.height())
-        else {
-            tracing::warn!("Monitor geometry unavailable; skipped for toast placement");
-            continue;
-        };
-        let scale = monitor.scale_factor().unwrap_or(1.0);
-        let scale = if scale > 0.0 { scale } else { 1.0 };
-
-        rects.push(MonitorRect {
-            x: x as f32 / scale,
-            y: y as f32 / scale,
-            width: width as f32 / scale,
-            height: height as f32 / scale,
-            primary: monitor.is_primary().unwrap_or(false),
-        });
-    }
-
-    Ok(rects)
-}
-
-/// Where the toast windows go (spec §4.3 v5.5): `xcap` monitor geometry when
-/// available — one placement per monitor with `on_all_monitors`, otherwise the
-/// primary monitor. When enumeration fails or reports nothing, ONE fallback
-/// placement from egui's current-monitor size (`ViewportInfo::monitor_size`,
-/// `None` on Wayland) — and with no size at all the toast stays unpositioned
-/// and the compositor places it. Failures are WARNed; the app keeps running.
-fn toast_placements(
-    ctx: &egui::Context,
-    overlay: &config::Overlay,
-    size: egui::Vec2,
-) -> Vec<Option<egui::Pos2>> {
-    let rects = match monitor_rects() {
-        Ok(rects) => rects,
-        Err(err) => {
-            tracing::warn!("Monitor enumeration failed ({err}); using the current monitor");
-            Vec::new()
-        }
-    };
-
-    if !rects.is_empty() {
-        return toast_positions(
-            &rects,
-            overlay.position,
-            size,
-            TOAST_OFFSET_X,
-            TOAST_OFFSET_Y,
-            overlay.on_all_monitors,
-        )
-        .into_iter()
-        .map(Some)
-        .collect();
-    }
-
-    let fallback = toast_position(
-        ctx.input(|i| i.viewport().monitor_size),
-        overlay.position,
-        size,
-    );
-    if fallback.is_none() {
-        tracing::warn!("No monitor geometry available; toast placed by the compositor");
-    }
-    vec![fallback]
-}
-
-/// INFO summary of the toast placements (Windows diagnostics, spec §4.3):
-/// logical position of each toast window, or `compositor-placed`.
-fn placement_summary(viewports: &[ToastViewport]) -> String {
-    let parts: Vec<String> = viewports
-        .iter()
-        .map(|viewport| match viewport.position {
-            Some(position) => format!("({} x {})", position.x, position.y),
-            None => "compositor-placed".to_owned(),
-        })
-        .collect();
-    parts.join(" ")
-}
-
-/// Fresh toast windows for a spawn: ONE per placement, ids unique within
-/// `generation` (spec §4.3 — a replacement never reuses a live window).
-fn toast_windows(generation: u64, positions: &[Option<egui::Pos2>]) -> Vec<ToastViewport> {
-    positions
-        .iter()
-        .enumerate()
-        .map(|(index, position)| ToastViewport {
-            id: toast_viewport_id(generation, index),
-            position: *position,
-            painted: Arc::new(AtomicBool::new(false)),
-        })
-        .collect()
-}
-
-/// What one pass of toast-window bookkeeping does (spec §4.3 v6.1).
-#[derive(Debug, Clone)]
-struct ToastWindowStep {
-    /// Windows to close this pass (the previous generation).
-    close: Vec<egui::ViewportId>,
-    /// Windows to show this pass: the previous ones when nothing changed, the
-    /// drained queue when it spawns, nothing while a replacement is waiting.
-    show: Vec<ToastViewport>,
-    /// Placements queued for the NEXT pass (`None` = nothing queued).
-    pending: Option<Vec<Option<egui::Pos2>>>,
-    /// Whether `show` is a fresh spawn (drives the INFO placement summary).
-    spawned: bool,
-}
-
-/// Pure toast-window lifecycle mapping (spec §4.3 v6.1: exactly ONE toast
-/// window per monitor, a new toast REPLACES the current one — never a stack).
-///
-/// The spawn of a REPLACEMENT is deferred to the pass after the close, because
-/// eframe creates windows for new viewports BEFORE it destroys the windows of
-/// viewports that are gone (`handle_viewport_output`: `initialize_all_windows`
-/// then `remove_viewports_not_in`), and egui drops an unused child viewport
-/// only at the END of the pass (`end_pass`: "it was never used this pass").
-/// Spawning in the same pass as the close therefore leaves the OLD window on
-/// screen while the new one appears — the second window (the white unpainted
-/// strip) the user saw. With this mapping the old windows are gone before the
-/// new ones are created, so at most one window per monitor exists at any time.
-/// A toast with nothing live (the first one, or a spawn queued by an earlier
-/// replacement) spawns in the pass it is requested.
-fn toast_window_step(
-    live: &[ToastViewport],
-    pending: Option<Vec<Option<egui::Pos2>>>,
-    requested: Option<Vec<Option<egui::Pos2>>>,
-    alive: bool,
-    generation: u64,
-) -> ToastWindowStep {
-    if !alive {
-        // The toast ended: close whatever is live and drop anything queued, so
-        // a toast that expired before its spawn pass never appears.
-        return ToastWindowStep {
-            close: live.iter().map(|viewport| viewport.id).collect(),
-            show: Vec::new(),
-            pending: None,
-            spawned: false,
-        };
-    }
-
-    // A replacement is only a replacement when there is something to close: a
-    // first toast (nothing live) spawns in this same pass.
-    let replacing = requested.is_some() && !live.is_empty();
-    let queued = requested.or(pending);
-    let close = if replacing {
-        live.iter().map(|viewport| viewport.id).collect()
-    } else {
-        Vec::new()
-    };
-
-    if replacing {
-        // The live windows are closed this pass and the fresh placements wait
-        // for the NEXT pass, so nothing is painted while the close happens.
-        return ToastWindowStep {
-            close,
-            show: Vec::new(),
-            pending: queued,
-            spawned: false,
-        };
-    }
-
-    // A queued spawn only exists while NO window is live (a replacement step
-    // clears `live`), so with windows live there is nothing to spawn or queue.
-    if live.is_empty()
-        && let Some(positions) = queued
-    {
-        return ToastWindowStep {
-            close,
-            show: toast_windows(generation, &positions),
-            pending: None,
-            spawned: true,
-        };
-    }
-
-    ToastWindowStep {
-        close,
-        show: live.to_vec(),
-        pending: None,
-        spawned: false,
-    }
-}
-
-/// Commands for a LIVE toast window (spec §4.3 v6.1): paint it while it is
-/// hidden, and show it ONLY once its ui callback has run — a window shown
-/// before that is the white unpainted strip. `RequestPaintWhileHidden` holds
-/// for one frame (`egui::ViewportCommand`), so it is re-sent every pass the
-/// toast is alive; the same request keeps the fade-out animating.
-fn toast_show_commands(painted: bool) -> Vec<egui::ViewportCommand> {
-    let mut commands = vec![egui::ViewportCommand::RequestPaintWhileHidden];
-    if painted {
-        commands.push(egui::ViewportCommand::Visible(true));
-    }
-    commands
-}
 
 /// Start directory for the Browse folder picker (spec §4.4): the draft
 /// `save_path` when it exists on disk, else `<home>/Pictures`
@@ -881,7 +481,8 @@ pub(crate) enum Error {
 }
 
 /// The settings-window app. Owns the draft settings, the hotkey controller
-/// (main-thread manager), and bind-by-press state.
+/// (main-thread manager), the toast stack (`ToastService` + `OverlayHost`,
+/// spec §4.3), and bind-by-press state.
 pub(crate) struct SettingsApp {
     config_path: PathBuf,
     /// Last applied settings — closing without Apply resets the draft to it.
@@ -908,19 +509,22 @@ pub(crate) struct SettingsApp {
     /// beside the pad button. In-memory only: a label is device-dependent, so it
     /// is not part of the persisted notation.
     pad_hints: HashMap<Action, String>,
-    /// Toast mailbox filled by capture threads (spec §4.3); polled in `logic`.
-    toast_mailbox: ToastMailbox,
-    /// Current toast lifecycle — one toast at a time, newest replaces (spec §4.3).
-    toast: Option<ToastState>,
-    /// Live toast windows (spec §4.3 v5.5): one per monitor when
-    /// `overlay.on_all_monitors`, otherwise one on the primary monitor.
-    toast_viewports: Vec<ToastViewport>,
-    /// Placements of a replacement waiting for the NEXT pass (spec §4.3 v6.1):
-    /// the fresh windows spawn only after the previous ones are gone, so old
-    /// and new toast windows never co-exist. See `toast_window_step`.
-    toast_pending: Option<Vec<Option<egui::Pos2>>>,
-    /// Increments on every replacement so toast viewport ids stay unique.
-    toast_generation: u64,
+    /// Toast timer thread (spec §4.3): owns chip lifetimes — latest wins,
+    /// fade-out at the end, errors held longer. Declared BEFORE `overlay_host`
+    /// so its `Drop` (Quit + join, hiding chips) runs while the host backend
+    /// is still alive. Read by nothing: this field is the owner, and ownership
+    /// is the whole reason it exists.
+    #[allow(dead_code)] // Owned for its lifetime only; the service is driven
+    // through the handle the triggers hold, and it shuts down on drop.
+    toast_service: ToastService,
+    /// Toast viewport backend (crates/overlay host loop): chips are child egui
+    /// viewports spawned, painted, and faded here; `logic` drives it every
+    /// pass (spec §4.3).
+    overlay_host: OverlayHost,
+    /// Latest-only toast-handle slot shared with the hotkey listener and the
+    /// pad pump (`main` created it); `run`'s create closure fills it, so
+    /// triggers can attach a chip to their capture (spec §4.3 hand-off).
+    handoff: ToastHandoff,
     /// Tray controller (spec §4.5, Stage 10); `None` when the tray failed to
     /// start (typed error logged by main). Polled in `logic`.
     tray: Option<TrayController>,
@@ -936,7 +540,9 @@ impl SettingsApp {
         settings: Settings,
         controller: Option<HotkeysController>,
         status: Vec<Registration>,
-        toast_mailbox: ToastMailbox,
+        toast_service: ToastService,
+        overlay_host: OverlayHost,
+        handoff: ToastHandoff,
         tray: Option<TrayController>,
         settings_mailbox: Arc<Mutex<Settings>>,
         pad_capture: PadCaptureMailbox,
@@ -953,11 +559,9 @@ impl SettingsApp {
             pad_capture,
             settings_mailbox,
             pad_hints: HashMap::new(),
-            toast_mailbox,
-            toast: None,
-            toast_viewports: Vec::new(),
-            toast_pending: None,
-            toast_generation: 0,
+            toast_service,
+            overlay_host,
+            handoff,
             tray,
             exit_requested: false,
         }
@@ -1152,172 +756,6 @@ impl SettingsApp {
                 return;
             }
         }
-    }
-
-    /// Toast lifecycle + toast windows (spec §4.3 v5.5). Polls the mailbox
-    /// (newest wins), starts/replaces the toast, paints the fade while it
-    /// lives, and closes the toast windows once gone. A success toast is
-    /// skipped when `overlay.enabled` is false; an error toast always shows.
-    ///
-    /// Visibility fix (the Windows bug): while the settings window is HIDDEN
-    /// eframe runs `App::logic` only, and egui produces `ViewportOutput` (the
-    /// builder + ui callback of a deferred viewport) ONLY in
-    /// `Context::end_pass` — `run_logic` returns `LogicOutput` with no viewport
-    /// output (egui `src/data/output.rs`), and eframe's hidden-window branch
-    /// consumes just that (`glow_integration.rs`). So a toast spawned from
-    /// `logic` while hidden never became a window — the toast was invisible,
-    /// not just misplaced. `ViewportCommand::RequestPaintWhileHidden` on the
-    /// ROOT viewport sets `ActionRequested::PaintWhileHidden`, whose
-    /// `wants_paint()` makes eframe treat the hidden window as visible for the
-    /// pass (`is_visible` in `glow_integration`) → the next pass is a FULL pass
-    /// that delivers toast builders and animates the fade (eframe paints
-    /// invisible windows directly, throttled to 100 ms — `run.rs`). Sent every
-    /// pass while a toast is alive; with no toast the window returns to cheap
-    /// logic-only ticks.
-    ///
-    /// First-frame fix (spec §4.3 v6.0, Stage 21): the chip paints at full
-    /// opacity from its first frame — `overlay::ToastState::alpha` fades out
-    /// only at the end of the lifecycle, because a fade-in ramp starts at alpha
-    /// 0 and `Color32::gamma_multiply` scales the alpha channel too, leaving the
-    /// window painted EMPTY. Commands and repaint requests for a toast viewport
-    /// are sent only once its window exists (`viewport_has_window`): the window
-    /// appears at the end of the spawn pass, so a request from that pass is
-    /// dropped by eframe AND silences all later requests (see the helper's doc).
-    ///
-    /// One window per monitor (spec §4.3 v6.1): a replacement CLOSES the current
-    /// windows and queues the fresh placements, spawning them on the NEXT pass
-    /// (`toast_window_step`). eframe creates the windows of new viewports
-    /// BEFORE it destroys the windows of viewports that are gone
-    /// (`handle_viewport_output`: `initialize_all_windows` then
-    /// `remove_viewports_not_in`), so spawning in the close pass left the old
-    /// window and the new one on screen together.
-    ///
-    /// No unpainted window (spec §4.3 v6.1): egui 0.37 has NO per-viewport
-    /// background color — `ViewportBuilder` has no inner-color field and
-    /// `ViewportCommand` has no fill command (`ViewportBuilder::with_inner_color`
-    /// does not exist), so the window's own paint is the only thing that can
-    /// cover the white DWM glass of a created-but-never-painted window. The toast
-    /// window is therefore created HIDDEN (`with_visible(false)`) and painted
-    /// while hidden: `RequestPaintWhileHidden` becomes
-    /// `ActionRequested::PaintWhileHidden`, whose `wants_paint()` makes eframe
-    /// treat the hidden window as painted (`is_visible` in `glow_integration`)
-    /// and run its ui callback. Once that callback has run the window really has
-    /// pixels, so it is shown with `ViewportCommand::Visible(true)`.
-    /// `with_active(false)` makes winit show it with `SW_SHOWNOACTIVATE`
-    /// (`winit window_state.rs`), so a toast never steals focus. The price: the
-    /// toast appears ~2 passes (~200 ms) after the capture finishes, always
-    /// inside the §4.3 hold.
-    fn update_toast(&mut self, ctx: &egui::Context) {
-        let now = ctx.input(|i| i.time);
-
-        let mut requested: Option<Vec<Option<egui::Pos2>>> = None;
-        if let Some(notification) = take_latest(&self.toast_mailbox)
-            && should_show(&notification, &self.applied.overlay)
-        {
-            match &mut self.toast {
-                Some(state) => state.replace(notification, &self.applied.overlay, now),
-                None => {
-                    self.toast = Some(ToastState::new(notification, &self.applied.overlay, now));
-                }
-            }
-            self.toast_generation = self.toast_generation.wrapping_add(1);
-            requested = self.toast.as_ref().map(|state| {
-                toast_placements(ctx, &self.applied.overlay, toast_window_size(&state.text()))
-            });
-        }
-
-        let alive = self.toast.as_ref().is_some_and(|state| !state.is_gone(now));
-        let step = toast_window_step(
-            &self.toast_viewports,
-            self.toast_pending.take(),
-            requested,
-            alive,
-            self.toast_generation,
-        );
-        if !alive {
-            self.toast = None;
-        }
-        self.apply_toast_windows(ctx, step);
-
-        let Some(state) = &self.toast else {
-            return;
-        };
-
-        let text = state.text();
-        let alpha = state.alpha(now);
-        let size = toast_window_size(&text);
-
-        // egui needs `show_viewport_deferred` on every pass the child exists;
-        // the callback is replaced each pass, so the fade alpha updates.
-        for viewport in &self.toast_viewports {
-            let builder = egui::ViewportBuilder::default()
-                .with_title("virshot")
-                .with_inner_size(size)
-                .with_visible(false)
-                .with_active(false)
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_mouse_passthrough(true)
-                .with_always_on_top();
-            let builder = match viewport.position {
-                Some(position) => builder.with_position(position),
-                None => builder,
-            };
-            let text = text.clone();
-            let painted_cb = Arc::clone(&viewport.painted);
-            ctx.show_viewport_deferred(viewport.id, builder, move |ui, _class| {
-                painted_cb.store(true, Ordering::Relaxed);
-                let rect = ui.max_rect();
-                ui.painter()
-                    .rect_filled(rect, 8.0, TOAST_FILL.gamma_multiply(alpha));
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    &text,
-                    egui::FontId::proportional(14.0),
-                    TOAST_TEXT.gamma_multiply(alpha),
-                );
-            });
-            // Everything below needs a real window: a request or command sent to
-            // a viewport without one is dropped by eframe and silences every
-            // later request (`viewport_has_window`).
-            if ctx.input(|i| viewport_has_window(&i.raw, viewport.id)) {
-                for command in toast_show_commands(viewport.painted.load(Ordering::Relaxed)) {
-                    ctx.send_viewport_cmd_to(viewport.id, command);
-                }
-                ctx.request_repaint_of(viewport.id);
-            }
-        }
-
-        ctx.request_repaint();
-        ctx.send_viewport_cmd_to(
-            egui::ViewportId::ROOT,
-            egui::ViewportCommand::RequestPaintWhileHidden,
-        );
-    }
-
-    /// Applies a toast-window step (spec §4.3 v6.1): closes the windows being
-    /// replaced and shows the ones that spawn this pass. DEBUG per close batch,
-    /// INFO with the placement summary when windows appear.
-    fn apply_toast_windows(&mut self, ctx: &egui::Context, step: ToastWindowStep) {
-        if !step.close.is_empty() {
-            for id in &step.close {
-                ctx.send_viewport_cmd_to(*id, egui::ViewportCommand::Close);
-            }
-            tracing::debug!(
-                "Toast viewports closed ({}): toast replaced or finished",
-                step.close.len()
-            );
-        }
-        if step.spawned {
-            tracing::info!(
-                "Toast shown on {} monitor(s): {}",
-                step.show.len(),
-                placement_summary(&step.show)
-            );
-        }
-        self.toast_viewports = step.show;
-        self.toast_pending = step.pending;
     }
 
     fn general_tab(&mut self, ui: &mut egui::Ui) {
@@ -1568,11 +1006,15 @@ impl eframe::App for SettingsApp {
                         ctx.request_repaint();
                     }
                     TrayAction::TakeScreenshot => {
-                        capture::spawn_capture(capture::CaptureCommand {
-                            mode: capture::CaptureMode::FullScreen,
-                            settings: self.applied.clone(),
-                            toast: self.toast_mailbox.clone(),
-                        });
+                        capture::spawn_capture(
+                            capture::CaptureCommand {
+                                mode: capture::CaptureMode::FullScreen,
+                                // Owned settings for the capture thread (spec
+                                // §4.2); `applied` stays valid for the UI.
+                                settings: self.applied.clone(),
+                            },
+                            capture::handoff_handle(&self.handoff),
+                        );
                     }
                     TrayAction::Exit => {
                         self.exit_requested = true;
@@ -1599,17 +1041,24 @@ impl eframe::App for SettingsApp {
         // press is recorded even while the settings window is hidden.
         self.drain_pad_capture();
 
-        self.update_toast(ctx);
+        // Toast chips (spec §4.3): the crate owns the chip lifetimes
+        // (`toast::ToastService`); this line only drives the viewport backend —
+        // queued overlays become child egui viewports HERE, so chips spawn,
+        // paint, and fade on every pass, including the logic-only pass eframe
+        // runs while the settings window is hidden.
+        self.overlay_host.update(ctx);
 
         // Tray events arrive on crossbeam channels and never wake the winit
         // loop; schedule the next logic pass so polling stays alive while the
-        // window is hidden.
+        // window is hidden. The toast service wakes the same context on its
+        // fade ticks.
         ctx.request_repaint_after(TRAY_POLL_TICK);
     }
 
-    /// Alpha-0 clear so the transparent toast window shows through (eframe's
-    /// glow backend uses ONE clear color for all viewports). The settings
-    /// window stays fully opaque because `CentralPanel` paints its panel fill.
+    /// Alpha-0 clear so transparent windows show through (eframe's glow backend
+    /// uses ONE clear color for all viewports — including the toast child
+    /// viewports the overlay host creates). The settings window stays fully
+    /// opaque because `CentralPanel` paints its panel fill.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
     }
@@ -1646,17 +1095,83 @@ impl eframe::App for SettingsApp {
     }
 }
 
+/// Monitor list for the toast stack plus the startup placement-evidence line,
+/// from ONE enumeration pass: `overlay::monitors` (crates/overlay) is the
+/// single source of truth for monitor geometry — enumeration, the primary
+/// flag, the zero-size skip, the primary-first ordering, and the debug-line
+/// wording all live there; this adapter only wires them and logs. Rects are
+/// PHYSICAL desktop pixels, each carrying its own DPI scale (spec §4.3):
+/// `OverlayHost` divides a rect by the CHILD window's pixels-per-point
+/// (`crates/overlay/src/host.rs`), never by the root's. The PRIMARY monitor
+/// comes FIRST — toast `MonitorSel::Index(0)` means "the primary monitor"
+/// (crates/toast); `overlay::monitors` flags the OS primary monitor, not the
+/// monitor the settings window happens to sit on. A monitor with no usable
+/// size is skipped (WARN with a count); when winit reports no usable rects
+/// the toast falls back to the host window's own physical rect, and with no
+/// winit window at all to the root viewport's size scaled back from points —
+/// the app stays alive either way. Called on the MAIN thread at startup,
+/// never in the capture hot path; winit is reached only through
+/// `cc.winit_window()` (`virshot` has no winit dependency).
+fn host_monitor_rects(cc: &eframe::CreationContext<'_>) -> (Vec<overlay::MonitorRect>, String) {
+    if let Some(window) = cc.winit_window() {
+        let entries = overlay::monitors::from_winit_window(window);
+        // The debug line keeps winit's raw enumeration order — zero-size
+        // pseudo-monitors included — because the startup log is evidence of
+        // what the OS reported, not of what placement used.
+        let debug = overlay::monitors::debug_line(Some(&entries));
+        let rects = overlay::monitors::rects(&entries);
+        // `rects` skips zero-size entries without logging; count the difference
+        // here so pseudo-monitors still show up in the log.
+        if entries.len() > rects.len() {
+            tracing::warn!(
+                "Monitor geometry unavailable; skipped {} zero-size monitor(s) for toast placement",
+                entries.len() - rects.len()
+            );
+        }
+        if !rects.is_empty() {
+            return (rects, debug);
+        }
+        // The window exists but reported no usable geometry: its own physical
+        // inner size at its own scale is the only rect such a platform offers.
+        tracing::warn!("Monitor enumeration failed; toast falls back to the window's own rect");
+        return (vec![overlay::monitors::fallback_rect(window)], debug);
+    }
+    // No winit window at all: egui reports POINTS, so scale back to physical
+    // pixels; `fallback_rect_from_points` floors `ppp` to 1.0 and clamps each
+    // dimension to ≥1 px — the same arithmetic as the old inline fallback.
+    tracing::warn!("No winit window; toast falls back to the root viewport's monitor size");
+    let size = cc
+        .egui_ctx
+        .input(|i| {
+            let viewport = i.viewport();
+            viewport
+                .monitor_size
+                .or(viewport.inner_rect.map(|rect| rect.size()))
+        })
+        .unwrap_or(egui::Vec2::new(800.0, 600.0));
+    (
+        vec![overlay::monitors::fallback_rect_from_points(
+            (size.x, size.y),
+            cc.egui_ctx.pixels_per_point(),
+        )],
+        overlay::monitors::debug_line(None),
+    )
+}
+
 /// Open the settings window on the MAIN thread (the hotkey manager lives
 /// there; winit/eframe pumps Win32 messages — Windows WM_HOTKEY affinity;
 /// tray event handling here satisfies the main-thread affinity every backend
-/// expects). `toast_mailbox` is the overlay mailbox shared with the hotkey
-/// listener; `tray` is the tray controller (spec §4.5) or `None` after a
-/// logged tray failure; `settings_mailbox` is the settings mailbox `main`
-/// created for the hotkey listener and the pad pump (Apply publishes it), and
-/// `pad_capture` is the pad-capture mailbox shared with the pump (§4.4,
-/// Stage 5). Returns only if
-/// graphics setup failed; the caller falls back to the idle loop so the process
-/// stays resident (spec §5).
+/// expects). `handoff` is the latest-only toast-handle slot shared with the
+/// hotkey listener and the pad pump: the `create` closure below builds the
+/// toast stack (`overlay::OverlayHost` + `toast::ToastService`) and attaches
+/// the service handle to the slot, so every trigger can attach a chip to its
+/// capture (spec §4.3). `tray` is the tray controller (spec §4.5) or `None`
+/// after a logged tray failure; `settings_mailbox` is the settings mailbox
+/// `main` created for the hotkey listener and the pad pump (Apply publishes
+/// it), and `pad_capture` is the pad-capture mailbox shared with the pump
+/// (§4.4, Stage 5). Returns only if graphics setup failed; the caller falls
+/// back to the idle loop so the process stays resident (spec §5). The toast
+/// stack is owned by the app, so it lives for the whole loop and drops with it.
 #[allow(clippy::too_many_arguments)] // Startup wiring: one call site in `main`, each shared
 // mailbox named explicitly (same shape as `SettingsApp::new`).
 pub(crate) fn run(
@@ -1664,7 +1179,7 @@ pub(crate) fn run(
     settings: Settings,
     controller: Option<HotkeysController>,
     status: Vec<Registration>,
-    toast_mailbox: ToastMailbox,
+    handoff: ToastHandoff,
     tray: Option<TrayController>,
     settings_mailbox: Arc<Mutex<Settings>>,
     pad_capture: PadCaptureMailbox,
@@ -1674,7 +1189,7 @@ pub(crate) fn run(
             .with_title("virshot — Settings")
             .with_inner_size([INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT])
             // eframe derives the alpha-capable GL config from the ROOT viewport
-            // builder; the toast viewport needs it to be transparent.
+            // builder; the toast child viewports need it to be transparent.
             .with_transparent(true),
         ..Default::default()
     };
@@ -1682,13 +1197,37 @@ pub(crate) fn run(
     eframe::run_native(
         "virshot",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // Toast stack (spec §4.3): the host backend holds the monitor
+            // geometry, the timer thread owns chip lifetimes, and the wake
+            // context repaints this loop on fade ticks.
+            // One enumeration feeds both the toast rects and the rig line.
+            let (monitors, placement_line) = host_monitor_rects(cc);
+            // What the OS actually reported, in the same physical numbers the
+            // toast places chips in: the log is the Windows rig's evidence for
+            // telling a placement defect from a presentation one.
+            tracing::info!("Toast placement monitors: {placement_line}");
+            let host = OverlayHost::new();
+            host.set_monitors(monitors.clone());
+            // Placement diagnostics on stderr (`overlay: spawn/correction/drift`
+            // lines): chips are rare — one per shot success/fail — so the
+            // Windows rig gets placement evidence for free.
+            host.set_debug(true);
+            let service =
+                ToastService::spawn(Arc::new(host.handle()), monitors, Some(cc.egui_ctx.clone()));
+            capture::attach_handoff(&handoff, service.handle());
+            tracing::info!(
+                "Toast service started on {} monitor(s)",
+                host.monitors().len()
+            );
             Ok(Box::new(SettingsApp::new(
                 config_path,
                 settings,
                 controller,
                 status,
-                toast_mailbox,
+                service,
+                host,
+                handoff,
                 tray,
                 settings_mailbox,
                 pad_capture,

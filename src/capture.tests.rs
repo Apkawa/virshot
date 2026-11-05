@@ -3,26 +3,37 @@ use super::CaptureCommand;
 use super::CaptureMode;
 use super::Error;
 use super::WindowProbe;
+use super::attach_handoff;
 use super::encode_image;
+use super::handoff_handle;
+use super::new_handoff;
 use super::pick_foreground;
 use super::run_capture;
 use super::save_image;
-use super::toast_notification;
+use super::saved_text;
+use super::should_show;
+use super::toast_duration_ms;
+use super::toast_from_outcome;
 use super::unique_path;
 use crate::config::Format;
 use crate::config::General;
+use crate::config::Overlay;
+use crate::config::OverlayPosition;
 use crate::config::Settings;
-use crate::overlay::Notification;
-use crate::overlay::new_mailbox;
-use crate::overlay::take_latest;
 use crate::template;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use image::ImageFormat;
 use image::RgbaImage;
 use image::guess_format;
 use image::load_from_memory;
+use overlay::Corner;
+use overlay::OverlayHost;
 use std::error::Error as _;
 use std::path::PathBuf;
+use std::sync::Arc;
+use toast::MonitorSel;
+use toast::ToastColor;
+use toast::ToastService;
 
 /// Fixed injected instant: 2026-11-03 00:12:05 local — the spec §4.2
 /// `%iso` example. Time is always injected; the module boundary stamps
@@ -161,9 +172,11 @@ fn pick_foreground_own_pid_window_is_excluded() {
 #[test]
 fn pick_foreground_focused_foreign_window_is_selected() {
     let own_pid = std::process::id();
+    // Foreign pids are offsets of the test process pid: hardcoded small pids
+    // (11, 22) can collide with the process pid and make the test flaky.
     let probes = [
-        probe(1, 11, false),
-        probe(2, 22, true),
+        probe(1, own_pid.wrapping_add(1), false),
+        probe(2, own_pid.wrapping_add(2), true),
         probe(3, own_pid, true),
     ];
     assert_eq!(pick_foreground(&probes, own_pid), Some(1));
@@ -379,27 +392,236 @@ fn error_io_variant_includes_path_and_source() {
     assert!(err.source().is_some(), "io error must be kept as source");
 }
 
-// ---------- toast notification ----------
+// ---------- toast chip from outcome (spec §4.3) ----------
+
+/// `[overlay]` section with explicit values — the chip mapping reads exactly
+/// these four keys (spec §7).
+fn overlay(
+    position: OverlayPosition,
+    enabled: bool,
+    on_all_monitors: bool,
+    duration_ms: u64,
+) -> Overlay {
+    Overlay {
+        enabled,
+        position,
+        duration_ms,
+        on_all_monitors,
+    }
+}
+
+/// The typed failure whose message the chip must carry verbatim (spec §4.2:
+/// exactly "no active window").
+fn capture_failure() -> Error {
+    Error::NoActiveWindow
+}
 
 #[test]
-fn toast_notification_success_carries_full_saved_path() {
-    let path = PathBuf::from("./.tmp/capture-test-toast/shot.png");
-    assert_eq!(
-        toast_notification(&Ok(path.clone())),
-        Notification::Success { path },
-        "the toast hand-off keeps the full path (the log keeps it too)"
+fn should_show_success_only_while_overlay_enabled() {
+    let ok: Result<PathBuf, Error> = Ok(PathBuf::from("./.tmp/shot.png"));
+    assert!(
+        should_show(
+            &ok,
+            &overlay(OverlayPosition::BottomRight, true, true, 2000)
+        ),
+        "a success chip needs overlay.enabled"
+    );
+    assert!(
+        !should_show(
+            &ok,
+            &overlay(OverlayPosition::BottomRight, false, true, 2000)
+        ),
+        "a success chip is suppressed when overlay.enabled is false"
     );
 }
 
 #[test]
-fn toast_notification_error_carries_typed_message_for_toast_text() {
-    let notification = toast_notification(&Err(Error::NoActiveWindow));
+fn should_show_error_even_with_overlay_disabled() {
+    assert!(
+        should_show(
+            &Err(capture_failure()),
+            &overlay(OverlayPosition::BottomRight, false, false, 2000)
+        ),
+        "spec §4.3: errors show even with the overlay switched off"
+    );
+}
+
+#[test]
+fn saved_text_shows_the_file_name_only() {
     assert_eq!(
-        notification,
-        Notification::Error {
-            message: "no active window".to_owned()
-        },
+        saved_text(&PathBuf::from("./.tmp/capture-test-toast/shot.png")),
+        "Saved: shot.png",
+        "the chip names the file; the full path stays in the log"
+    );
+}
+
+#[test]
+fn saved_text_falls_back_to_the_full_path_without_a_file_name() {
+    assert_eq!(
+        saved_text(&PathBuf::from("/")),
+        "Saved: /",
+        "a path with no file name must still produce a readable chip"
+    );
+}
+
+#[test]
+fn toast_from_outcome_success_builds_a_saved_file_name_success_chip() {
+    let chip = toast_from_outcome(
+        &Ok(PathBuf::from("./.tmp/capture-test-toast/shot.png")),
+        &overlay(OverlayPosition::BottomRight, true, true, 2000),
+    )
+    .expect("a successful capture with the overlay enabled produces a chip");
+    assert_eq!(chip.text, "Saved: shot.png", "chip text is the file name");
+    assert_eq!(chip.color, ToastColor::Success, "success is a success chip");
+    assert_eq!(chip.image, None, "capture notifications are text chips");
+    assert_eq!(chip.corner, Corner::BottomRight, "default corner");
+    assert_eq!(
+        chip.duration_ms, 2000,
+        "hold comes from [overlay].duration_ms"
+    );
+    assert_eq!(
+        chip.monitor,
+        MonitorSel::All,
+        "on_all_monitors covers every monitor"
+    );
+}
+
+#[test]
+fn toast_from_outcome_success_with_overlay_disabled_shows_nothing() {
+    assert!(
+        toast_from_outcome(
+            &Ok(PathBuf::from("./.tmp/shot.png")),
+            &overlay(OverlayPosition::BottomRight, false, true, 2000),
+        )
+        .is_none(),
+        "overlay.enabled = false suppresses the success chip"
+    );
+}
+
+#[test]
+fn toast_from_outcome_error_is_a_danger_chip_with_the_verbatim_message() {
+    let chip = toast_from_outcome(
+        &Err(capture_failure()),
+        &overlay(OverlayPosition::TopLeft, true, false, 2000),
+    )
+    .expect("a failed capture always produces a chip");
+    assert_eq!(
+        chip.text, "no active window",
         "spec §4.2 requires exactly 'no active window' in the toast"
+    );
+    assert_eq!(chip.color, ToastColor::Danger, "failures are danger chips");
+}
+
+#[test]
+fn toast_from_outcome_error_shows_even_with_overlay_disabled() {
+    assert!(
+        toast_from_outcome(
+            &Err(capture_failure()),
+            &overlay(OverlayPosition::BottomRight, false, false, 2000),
+        )
+        .is_some(),
+        "spec §4.3: an error chip survives overlay.enabled = false"
+    );
+}
+
+#[test]
+fn toast_from_outcome_maps_each_position_to_the_matching_corner() {
+    let expected = [
+        (OverlayPosition::TopLeft, Corner::TopLeft),
+        (OverlayPosition::TopRight, Corner::TopRight),
+        (OverlayPosition::BottomLeft, Corner::BottomLeft),
+        (OverlayPosition::BottomRight, Corner::BottomRight),
+    ];
+    for (position, corner) in expected {
+        let chip = toast_from_outcome(
+            &Err(capture_failure()),
+            &overlay(position, true, true, 2000),
+        )
+        .expect("every position maps to a chip");
+        assert_eq!(chip.corner, corner, "{position:?} must anchor {corner:?}");
+    }
+}
+
+#[test]
+fn toast_from_outcome_selects_all_monitors_or_the_first_one() {
+    let all = toast_from_outcome(
+        &Err(capture_failure()),
+        &overlay(OverlayPosition::BottomRight, true, true, 2000),
+    )
+    .expect("chip for on_all_monitors = true");
+    assert_eq!(all.monitor, MonitorSel::All, "one chip per monitor");
+
+    let single = toast_from_outcome(
+        &Err(capture_failure()),
+        &overlay(OverlayPosition::BottomRight, true, false, 2000),
+    )
+    .expect("chip for on_all_monitors = false");
+    assert_eq!(
+        single.monitor,
+        MonitorSel::Index(0),
+        "the GUI puts the primary monitor first, so index 0 is it (spec §4.3)"
+    );
+}
+
+#[test]
+fn toast_duration_ms_carries_the_config_value_and_clamps_absurd_one() {
+    assert_eq!(
+        toast_duration_ms(&overlay(OverlayPosition::BottomRight, true, true, 1500)),
+        1500,
+        "[overlay].duration_ms is the chip hold"
+    );
+    assert_eq!(
+        toast_duration_ms(&overlay(OverlayPosition::BottomRight, true, true, u64::MAX)),
+        u32::MAX,
+        "a u64 config value clamps to the u32 chip hold instead of wrapping"
+    );
+}
+
+#[test]
+fn toast_duration_ms_keeps_zero_as_sticky() {
+    assert_eq!(
+        toast_duration_ms(&overlay(OverlayPosition::BottomRight, true, true, 0)),
+        0,
+        "0 means sticky until dismissed (crates/toast rule)"
+    );
+}
+
+// ---------- toast handle hand-off ----------
+
+/// A real toast service with the host backend and NO monitors: `show` would be
+/// a logged no-op there, so these tests exercise the slot itself (the same
+/// latest-only mailbox semantics the `hotkeys` settings mailbox has).
+fn started_service() -> ToastService {
+    let host = OverlayHost::new();
+    ToastService::spawn(Arc::new(host.handle()), Vec::new(), None)
+}
+
+#[test]
+fn handoff_has_no_handle_before_the_service_is_attached() {
+    assert!(
+        handoff_handle(&new_handoff()).is_none(),
+        "a capture started before the GUI exists carries no toast handle"
+    );
+}
+
+#[test]
+fn attach_handoff_exposes_a_usable_handle() {
+    let handoff = new_handoff();
+    let service = started_service();
+    attach_handoff(&handoff, service.handle());
+
+    let handle = handoff_handle(&handoff).expect("the attached handle is readable");
+    assert!(
+        handle
+            .show(
+                toast_from_outcome(
+                    &Ok(PathBuf::from("./.tmp/shot.png")),
+                    &overlay(OverlayPosition::BottomRight, true, true, 2000),
+                )
+                .expect("enabled success chip")
+            )
+            .is_ok(),
+        "the handle must accept a chip from a capture thread (no monitors → logged no-op)"
     );
 }
 
@@ -419,14 +641,14 @@ fn run_capture_full_screen_writes_valid_file() {
         },
         ..Settings::default()
     };
-    let toast = new_mailbox();
     let path = run_capture(
         CaptureCommand {
             mode: CaptureMode::FullScreen,
             settings,
-            toast: toast.clone(),
         },
         Local::now(),
+        // No GUI on this path: the chip is skipped, the file is the result.
+        None,
     )
     .expect("full-screen capture must succeed on a host with a display");
     assert!(
@@ -437,10 +659,5 @@ fn run_capture_full_screen_writes_valid_file() {
     assert!(
         decoded.width() > 0 && decoded.height() > 0,
         "captured image must not be empty"
-    );
-    assert_eq!(
-        take_latest(&toast),
-        Some(Notification::Success { path }),
-        "a successful capture must hand the saved path to the toast"
     );
 }

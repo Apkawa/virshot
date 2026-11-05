@@ -175,8 +175,40 @@ if [ "${UIVERIFY_INNER:-}" = 1 ]; then
       fail "no 'Saved:' log line after 3 hotkey attempts"
       note "$(grep -m2 'Capture failed\|foreground window' "$LOG" || true)"
     fi
-    grep -m1 'Toast shown on' "$LOG" >/dev/null 2>&1 \
-      && { note "$(grep -m1 'Toast shown on' "$LOG")"; pass "log: toast shown line"; } || fail "log: toast shown line missing"
+    # Toast evidence (Stage 4, spec §4.3): the chip is no longer drawn inside
+    # the settings window — crates/toast hands it to crates/overlay's OverlayHost,
+    # which spawns it as a CHILD egui viewport window of this pid. The chip
+    # lives `duration_ms` (~2 s), so the window and the corner pixels are
+    # asserted right after the 'Saved:' line, not from a log line.
+    grep -m1 'Toast service started on' "$LOG" >/dev/null 2>&1 \
+      && { note "$(grep -m1 'Toast service started on' "$LOG")"; pass "log: toast service started"; } \
+      || fail "log: toast service start line missing"
+    local chips=""
+    for _ in $(seq 0 10); do
+      chips=$(xdotool search --pid "$APP" 2>/dev/null | wc -l | tr -d ' ' || true)
+      [ "${chips:-0}" -ge 2 ] && break
+      sleep 0.3
+    done
+    if [ "${chips:-0}" -ge 2 ]; then
+      pass "toast chip window present (app has $chips window(s): settings + chip)"
+    else
+      fail "no toast chip window (app has ${chips:-0} window(s))"
+    fi
+    if timeout 20 import -window root -crop 260x70+1015+915 +repage "$D/shots/toast-corner.png" 2>>"$D/shots/import.err"; then
+      local n
+      n=$(unique_colors "$D/shots/toast-corner.png")
+      note "$(identify "$D/shots/toast-corner.png" 2>&1) unique_colors=$n"
+      [ "$n" -gt 3 ] && pass "toast corner non-blank ($n unique colors)" || fail "toast corner blank ($n unique colors)"
+    else
+      fail "toast corner crop failed: $(head -c 120 "$D/shots/import.err")"
+    fi
+    # crates/toast reports every show/spawn failure on stderr (merged into
+    # stdout.txt); a clean run prints nothing from it.
+    if grep -q '^toast: ' "$D/stdout.txt" 2>/dev/null; then
+      fail "toast crate reported a failure: $(grep -m1 '^toast: ' "$D/stdout.txt")"
+    else
+      pass "toast crate reported no failure"
+    fi
   }
 
   tray_name() {

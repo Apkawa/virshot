@@ -8,9 +8,10 @@ edition = "2024"
 # layout tests are std-only. `vendor/GameInput.h` is the ABI authority; see
 # `vendor/NOTICE.md` for its provenance.
 #
-# Deliberately NOT a workspace member: the repo root `Cargo.toml` declares no
-# `[workspace]`, so this manifest stands alone and the root `./cargo.sh check`
-# never compiles it. Build/test it from this directory:
+# Listed in the root manifest's `[workspace] exclude`, but cargo auto-adds
+# path-dep members, so gamepad IS a workspace member now (the root
+# `./cargo.sh clippy --workspace` compiles it). It stays standalone-buildable
+# from this directory as before:
 #   cd crates/gamepad && ../../cargo.sh test
 #   cd crates/gamepad && ../../cargo.sh build --target x86_64-pc-windows-gnu
 

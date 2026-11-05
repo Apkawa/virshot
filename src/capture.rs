@@ -17,16 +17,22 @@
 //! `template::collision_variant`) until the path is free.
 //!
 //! Wiring: the CLI (`main.rs`) consumes `run_capture` for headless
-//! `virshot shot` (Stage 5); `spawn_capture` is consumed by the hotkey wiring
-//! in Stage 6, so only that fn carries an `allow(dead_code)` meanwhile — the
-//! semantics stay locked by unit tests (same precedent as `template`).
+//! `virshot shot` (Stage 5); `spawn_capture` is consumed by every trigger
+//! source — the hotkey listener, the pad pump (Windows), and both tray paths —
+//! so the semantics stay locked by unit tests (same precedent as `template`).
 //!
-//! Toast hand-off (spec §4.3, Stage 9): every outcome is also pushed to the
-//! command's `overlay::ToastMailbox` — success carries the full saved path,
-//! failure carries the typed error's message. The mailbox is a latest-only
-//! slot of owned values (the same permitted pattern as the `hotkeys` settings
-//! mailbox), not shared capture state; a headless run passes a mailbox nobody
-//! polls, so the push is inert there.
+//! Toast hand-off (spec §4.3, Stage 4 of the overlay/toast plan): every
+//! outcome becomes a `toast::Toast` shown through the notification handle the
+//! caller passes to `run_capture`/`spawn_capture` — success carries
+//! `Saved: <file name>` (the full path stays in the log), failure carries the
+//! typed error's message. The handle comes from the resident GUI's
+//! `toast::ToastService` (painted by `crates/overlay`'s host backend) and is
+//! read per trigger from [`ToastHandoff`]; a headless `virshot shot` run has
+//! no GUI and therefore no handle (`None`), so the notification is skipped and
+//! the CLI prints the path/logs instead. Which outcome produces a chip, and on
+//! which monitor/corner/hold, is decided here by pure functions against
+//! `config::Overlay` (the visibility gate from spec §4.3: errors always show,
+//! success only while `overlay.enabled`).
 
 use chrono::{DateTime, Local};
 use image::ExtendedColorType;
@@ -35,15 +41,21 @@ use image::RgbaImage;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::codecs::webp::WebPEncoder;
+use overlay::Corner;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use toast::MonitorSel;
+use toast::Toast;
+use toast::ToastColor;
+use toast::ToastHandle;
 
 use crate::config::Format;
 use crate::config::General;
+use crate::config::Overlay;
+use crate::config::OverlayPosition;
 use crate::config::Settings;
-use crate::overlay::Notification;
-use crate::overlay::ToastMailbox;
-use crate::overlay::push;
 use crate::template;
 
 /// Capture/save failures, typed per module (`thiserror` enum, no stringly
@@ -113,27 +125,135 @@ pub(crate) enum CaptureMode {
     Window,
 }
 
-/// Owned values for one capture: mode + settings + the toast mailbox. The save
-/// thread takes ownership (spec §4.2 thread boundary — no shared capture
-/// state, no channel back to the main thread); the mailbox is the one
-/// latest-only hand-off, consumed by the GUI overlay (spec §4.3).
-#[derive(Debug, Clone)]
+/// Capture request: WHAT to capture — the mode plus the settings that decide
+/// the target, format, and save path. The save thread takes ownership (spec
+/// §4.2 thread boundary — no shared capture state, no channel back to the main
+/// thread). WHERE the outcome is reported is a separate parameter (see
+/// [`ToastHandoff`] and [`run_capture`]), not part of the request.
 pub(crate) struct CaptureCommand {
     pub(crate) mode: CaptureMode,
     pub(crate) settings: Settings,
-    pub(crate) toast: ToastMailbox,
 }
 
-/// The toast notification for one capture outcome (spec §4.3): success carries
-/// the full saved path (`overlay::toast_text` shows just the file name, the
-/// log keeps the full path), failure carries the typed error's display
-/// message.
-fn toast_notification(outcome: &Result<PathBuf, Error>) -> Notification {
+/// Latest-only slot holding the toast handle for the whole resident process
+/// (spec §4.3 hand-off). The GUI's create closure attaches the handle once
+/// `toast::ToastService` exists; trigger threads (hotkey listener, pad pump,
+/// tray) read a clone per capture, so a capture started before the GUI is up —
+/// or after it is gone — simply carries no handle. The same latest-only slot
+/// of owned values the `hotkeys` settings mailbox uses, not shared capture
+/// state.
+pub(crate) type ToastHandoff = Arc<Mutex<Option<ToastHandle>>>;
+
+/// Empty handoff: no toast service yet (or never, on the headless CLI path).
+pub(crate) fn new_handoff() -> ToastHandoff {
+    Arc::new(Mutex::new(None))
+}
+
+/// Attach the service's handle. A later attach replaces the earlier one — the
+/// slot is latest-only, like every mailbox in this repo.
+pub(crate) fn attach_handoff(handoff: &ToastHandoff, handle: ToastHandle) {
+    let mut slot = handoff
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = Some(handle);
+}
+
+/// The handle a capture should use right now: `None` while no toast service is
+/// attached. Poisoned (a panic elsewhere) is recovered, like every other
+/// mailbox here — a toast is never worth aborting a capture over.
+pub(crate) fn handoff_handle(handoff: &ToastHandoff) -> Option<ToastHandle> {
+    handoff
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Visibility gate (spec §4.3): a success chip needs `overlay.enabled`; an
+/// error chip shows ALWAYS — even with the overlay switched off, the user must
+/// see why the capture failed.
+fn should_show(outcome: &Result<PathBuf, Error>, overlay: &Overlay) -> bool {
     match outcome {
-        Ok(path) => Notification::Success { path: path.clone() },
-        Err(err) => Notification::Error {
-            message: err.to_string(),
-        },
+        Ok(_) => overlay.enabled,
+        Err(_) => true,
+    }
+}
+
+/// Configured corner → the chip corner (`crates/overlay` anchors by corner,
+/// spec §4.3: the four screen corners, insets handled by `overlay::place`).
+fn toast_corner(position: OverlayPosition) -> Corner {
+    match position {
+        OverlayPosition::TopLeft => Corner::TopLeft,
+        OverlayPosition::TopRight => Corner::TopRight,
+        OverlayPosition::BottomLeft => Corner::BottomLeft,
+        OverlayPosition::BottomRight => Corner::BottomRight,
+    }
+}
+
+/// Monitor selection (spec §4.3): `on_all_monitors` → one chip on every
+/// monitor; otherwise the primary monitor, which the GUI puts FIRST in the
+/// monitor list it hands the service, so `Index(0)` is that monitor.
+fn monitor_sel(on_all_monitors: bool) -> MonitorSel {
+    if on_all_monitors {
+        MonitorSel::All
+    } else {
+        MonitorSel::Index(0)
+    }
+}
+
+/// `duration_ms` from `[overlay]` as the chip's hold. The config field is
+/// `u64`; a chip hold is `u32`, so an absurd value clamps instead of wrapping.
+/// `0` stays `0` — sticky until dismissed (`crates/toast` rule).
+fn toast_duration_ms(overlay: &Overlay) -> u32 {
+    u32::try_from(overlay.duration_ms).unwrap_or(u32::MAX)
+}
+
+/// Success chip text (spec §4.3): `Saved: <file name>` only — the full path is
+/// in the log. A path with no usable file name shows the full path rather
+/// than an empty chip.
+fn saved_text(path: &Path) -> String {
+    match path.file_name() {
+        Some(name) => format!("Saved: {}", name.to_string_lossy()),
+        None => format!("Saved: {}", path.display()),
+    }
+}
+
+/// The chip for one capture outcome, or `None` when nothing is shown (success
+/// with `overlay.enabled = false`). Success is a `Success` chip, failure a
+/// `Danger` chip carrying the typed error's message verbatim — `crates/toast`
+/// holds `Danger` for its own error hold regardless of `duration_ms`.
+fn toast_from_outcome(outcome: &Result<PathBuf, Error>, overlay: &Overlay) -> Option<Toast> {
+    if !should_show(outcome, overlay) {
+        return None;
+    }
+    let (text, color) = match outcome {
+        Ok(path) => (saved_text(path), ToastColor::Success),
+        Err(err) => (err.to_string(), ToastColor::Danger),
+    };
+    Some(Toast {
+        monitor: monitor_sel(overlay.on_all_monitors),
+        text,
+        image: None,
+        color,
+        corner: toast_corner(overlay.position),
+        duration_ms: toast_duration_ms(overlay),
+    })
+}
+
+/// Show the outcome through the handle the caller passed (spec §4.3). No
+/// handle (headless CLI, or a trigger before the GUI exists) or a suppressed
+/// chip → nothing happens; a closed toast channel is WARNed, never fatal —
+/// the capture result itself is what the caller gets.
+fn notify(toast: Option<ToastHandle>, outcome: &Result<PathBuf, Error>, overlay: &Overlay) {
+    let Some(handle) = toast else {
+        tracing::debug!("No toast handle attached; notification skipped (headless run)");
+        return;
+    };
+    let Some(toast) = toast_from_outcome(outcome, overlay) else {
+        tracing::debug!("Toast suppressed: overlay disabled for a successful capture");
+        return;
+    };
+    if let Err(err) = handle.show(toast) {
+        tracing::warn!("Toast notification failed: {err}");
     }
 }
 
@@ -141,29 +261,36 @@ fn toast_notification(outcome: &Result<PathBuf, Error>) -> Notification {
 /// micro-freeze the game). The thread stamps the capture moment at this
 /// module boundary, grabs, encodes, saves, and logs the outcome: success is
 /// `INFO "Saved: <full path>"` (the toast shows just the file name), failure
-/// is `ERROR` with the typed error. The toast notification is pushed by
-/// [`run_capture`] at the module boundary, in the same frame as the log line.
-/// Nothing else is shared back; the app never aborts on capture failure (the
-/// handle is dropped, the thread runs detached).
-#[allow(dead_code)] // consumed by the hotkey wiring in Stage 6; headless `shot` uses `run_capture`
-pub(crate) fn spawn_capture(command: CaptureCommand) {
+/// is `ERROR` with the typed error. The chip is shown by [`run_capture`] at
+/// the module boundary, in the same frame as the log line. Nothing else is
+/// shared back; the app never aborts on capture failure (the thread runs
+/// detached). `toast` is the handle read from the shared hand-off slot by the
+/// trigger (`handoff_handle`); `None` means no chip.
+pub(crate) fn spawn_capture(command: CaptureCommand, toast: Option<ToastHandle>) {
     std::thread::spawn(move || {
         let now = chrono::Local::now();
-        match run_capture(command, now) {
+        match run_capture(command, now, toast) {
             Ok(path) => tracing::info!("Saved: {}", path.display()),
             Err(err) => tracing::error!("Capture failed: {err}"),
         }
     });
 }
 
-/// Synchronous capture: run [`capture_core`] and hand the outcome to the
-/// command's toast mailbox before returning it, so the GUI sees the same
-/// result the log records. Failure modes: see [`Error`] — never a panic,
-/// callers log and keep running.
-pub(crate) fn run_capture(command: CaptureCommand, now: DateTime<Local>) -> Result<PathBuf, Error> {
-    let toast = command.toast.clone();
-    let outcome = capture_core(command, now);
-    push(&toast, toast_notification(&outcome));
+/// Synchronous capture: run [`capture_core`] and show the outcome's toast
+/// before returning it, so the user sees the same result the log records.
+/// `toast` is the notification handle (`None` on the headless CLI path, where
+/// the outcome is printed and logged instead — spec §4.3). Failure modes: see
+/// [`Error`] — never a panic, callers log and keep running.
+pub(crate) fn run_capture(
+    command: CaptureCommand,
+    now: DateTime<Local>,
+    toast: Option<ToastHandle>,
+) -> Result<PathBuf, Error> {
+    // Destructured so the `[overlay]` section can be read after the settings
+    // move into the capture core (no clone of the whole settings).
+    let CaptureCommand { mode, settings } = command;
+    let outcome = capture_core(mode, &settings, now);
+    notify(toast, &outcome, &settings.overlay);
     outcome
 }
 
@@ -172,11 +299,15 @@ pub(crate) fn run_capture(command: CaptureCommand, now: DateTime<Local>) -> Resu
 /// capture moment stamped by the caller at the module boundary), so filename
 /// logic stays deterministic; `render` never reads the clock. Failure modes:
 /// see [`Error`] — never a panic, callers log and keep running.
-fn capture_core(command: CaptureCommand, now: DateTime<Local>) -> Result<PathBuf, Error> {
-    let general = &command.settings.general;
+fn capture_core(
+    mode: CaptureMode,
+    settings: &Settings,
+    now: DateTime<Local>,
+) -> Result<PathBuf, Error> {
+    let general = &settings.general;
     let ext = general.format.extension();
 
-    let (image, title, template_str) = match command.mode {
+    let (image, title, template_str) = match mode {
         CaptureMode::FullScreen => {
             // Foreground cannot be determined (no focused foreign window, or
             // enumeration failed on a host without the platform's window API)

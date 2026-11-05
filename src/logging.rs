@@ -172,12 +172,21 @@ fn install(log_path: &Path, level: Level) -> Result<(), Error> {
         .with_target(true)
         .with_level(true)
         .with_max_level(tracing::Level::from(level))
-        .with_writer(make_writer)
-        .finish();
+        .with_writer(make_writer);
 
-    // Only fails when a global subscriber already exists, which is exactly the
-    // "already initialised" case: report success and keep the existing one.
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    // `SubscriberBuilder::try_init` installs the subscriber AND wires `log`
+    // records into tracing through `tracing_log::LogTracer` (the default
+    // `tracing-log` feature of tracing-subscriber 0.3.23, kept enabled by this
+    // manifest), so eframe's internal `log::error!("Failed to initialize a
+    // window for viewport …")` lands in this file instead of vanishing. 0.3.23
+    // has no `with_tracing_logs()` — `try_init` is this version's bridge, and
+    // it needs no new dependency. It also mirrors the subscriber's max level
+    // onto `log`, so filtered `log` diagnostics are skipped cheaply.
+    //
+    // It reports an error when a global subscriber — or a separate `log`
+    // logger — already exists, which is exactly the "already initialised"
+    // case: report success and keep whatever is already in place.
+    subscriber.try_init().ok();
     Ok(())
 }
 

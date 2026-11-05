@@ -24,11 +24,15 @@
 //! on the MAIN thread — Windows WM_HOTKEY thread affinity), opens the eframe
 //! settings window on the MAIN thread (`gui`); the window X button hides the
 //! window and keeps the process resident (cancel-close + hide), so the
-//! hotkeys stay live. The `overlay` toast (Stage 9) shares one mailbox with
-//! the capture threads and is painted by `gui` in a click-through, transparent
-//! viewport. Tray (Stage 10, spec §4.5): attempted BEFORE the GUI via
-//! `tray::TrayController` so it exists even when the GUI cannot open; a tray
-//! failure is a typed ERROR log and the app keeps running without a tray.
+//! hotkeys stay live. Notifications go through `crates/toast`: the GUI's
+//! eframe loop hosts `crates/overlay`'s `OverlayHost` (toast chips are
+//! click-through, transparent, content-protected child viewports), and its
+//! `ToastService` handle is attached to a latest-only hand-off slot
+//! (`capture::ToastHandoff`) that every trigger thread reads per capture
+//! (Stage 4 of the overlay/toast plan). Tray (Stage 10, spec §4.5): attempted
+//! BEFORE the GUI via `tray::TrayController` so it exists even when the GUI
+//! cannot open; a tray failure is a typed ERROR log and the app keeps running
+//! without a tray.
 //! While the GUI runs, `gui::logic` maps tray actions (left click/Settings →
 //! re-show the hidden window; Take screenshot → full-screen capture; Exit →
 //! real shutdown, the only exit path). If the GUI cannot open, the main
@@ -67,7 +71,6 @@ mod gui;
 mod hotkeys;
 mod instance;
 mod logging;
-mod overlay;
 mod template;
 mod tray;
 
@@ -85,6 +88,9 @@ use std::sync::atomic::Ordering;
 
 use crate::capture::CaptureCommand;
 use crate::capture::CaptureMode;
+use crate::capture::ToastHandoff;
+use crate::capture::handoff_handle;
+use crate::capture::new_handoff;
 use crate::config::Format;
 use crate::config::General;
 use crate::config::Settings;
@@ -245,12 +251,12 @@ fn run_shot(
             controls,
             overlay,
         },
-        // Headless one-shot: nobody polls this mailbox — capture still runs and
-        // the CLI contract (stdout path / stderr error + exit code) is unchanged.
-        toast: overlay::new_mailbox(),
     };
 
-    let outcome = capture::run_capture(command, Local::now());
+    // Headless one-shot: no GUI, so no toast service exists and no handle can
+    // be passed — the notification is skipped and the CLI contract (stdout
+    // path / stderr error + exit code) is unchanged (spec §4.3).
+    let outcome = capture::run_capture(command, Local::now(), None);
     let code = match outcome {
         Ok(path) => {
             tracing::info!("Saved: {}", path.display());
@@ -338,9 +344,11 @@ fn run_resident(config_path: &Path) -> ExitCode {
         }
     };
     tracing::info!("Instance lock acquired (pid {})", std::process::id());
-    // One toast mailbox for the whole resident process: capture threads push,
-    // the GUI polls it in its logic pass (spec §4.3).
-    let toast = overlay::new_mailbox();
+    // One toast-handle hand-off for the whole resident process (spec §4.3):
+    // empty until the GUI attaches the `ToastService` handle in its create
+    // closure; capture threads read a clone per trigger, so a capture fired
+    // before the GUI exists (or after it is gone) simply carries no handle.
+    let handoff = new_handoff();
     // One settings mailbox for the whole resident process: UI Apply publishes
     // it, the hotkey listener clones it per trigger, and the pad pump re-parses
     // pad binds per event from the SAME Arc (Stage 5) — so a re-bind or a pad
@@ -352,7 +360,7 @@ fn run_resident(config_path: &Path) -> ExitCode {
     let debounce = Arc::new(Mutex::new(bindings::Debounce::default()));
     let (controller, registrations) = match hotkeys::HotkeysController::start(
         Arc::clone(&settings_mailbox),
-        toast.clone(),
+        Arc::clone(&handoff),
         Arc::clone(&debounce),
     ) {
         Ok((controller, status)) => {
@@ -374,7 +382,7 @@ fn run_resident(config_path: &Path) -> ExitCode {
     let pad_capture = gamepad::new_capture_mailbox();
     gamepad::spawn_pump(
         Arc::clone(&settings_mailbox),
-        toast.clone(),
+        Arc::clone(&handoff),
         Arc::clone(&debounce),
         Arc::clone(&pad_capture),
     );
@@ -398,14 +406,16 @@ fn run_resident(config_path: &Path) -> ExitCode {
         settings.clone(),
         controller,
         registrations,
-        toast.clone(),
+        Arc::clone(&handoff),
         tray.clone(),
         Arc::clone(&settings_mailbox),
         Arc::clone(&pad_capture),
     ) {
         tracing::error!("GUI failed: {err}");
         tracing::info!("virshot idle: running without GUI");
-        park_without_gui(tray, settings, toast);
+        // No GUI means no toast service: the slot stays empty and captures
+        // log instead of showing a chip.
+        park_without_gui(tray, settings, handoff);
         return ExitCode::SUCCESS;
     }
     // `run_native` only returns on real shutdown (tray Exit) or startup
@@ -415,15 +425,13 @@ fn run_resident(config_path: &Path) -> ExitCode {
 
 /// GUI-failure fallback (spec §5): park the MAIN thread and still serve the
 /// tray. Actions are polled on the idle tick (≤ 1 s latency): `Take
-/// screenshot` spawns a full-screen capture with the loaded settings and the
-/// shared mailbox; `Settings` degrades to a WARN (no window to show — the
-/// GUI failure was logged above); `Exit` sets [`RESIDENT_SHUTDOWN`] and the
+/// screenshot` spawns a full-screen capture with the loaded settings and a
+/// clone of the toast hand-off slot (empty on this path, so the capture logs
+/// instead of showing a chip); `Settings` degrades to a WARN (no window to
+/// show — the GUI failure was logged above); `Exit` sets
+/// [`RESIDENT_SHUTDOWN`] and the
 /// loop returns, so the process exits 0 — the only exit path without a GUI.
-fn park_without_gui(
-    tray: Option<tray::TrayController>,
-    settings: Settings,
-    toast: overlay::ToastMailbox,
-) {
+fn park_without_gui(tray: Option<tray::TrayController>, settings: Settings, handoff: ToastHandoff) {
     while !RESIDENT_SHUTDOWN.load(Ordering::Relaxed) {
         if let Some(tray) = &tray {
             for action in tray.poll() {
@@ -433,11 +441,13 @@ fn park_without_gui(
                         RESIDENT_SHUTDOWN.store(true, Ordering::Relaxed);
                     }
                     tray::TrayAction::TakeScreenshot => {
-                        capture::spawn_capture(CaptureCommand {
-                            mode: CaptureMode::FullScreen,
-                            settings: settings.clone(),
-                            toast: toast.clone(),
-                        });
+                        capture::spawn_capture(
+                            CaptureCommand {
+                                mode: CaptureMode::FullScreen,
+                                settings: settings.clone(),
+                            },
+                            handoff_handle(&handoff),
+                        );
                     }
                     tray::TrayAction::ShowSettings => {
                         tracing::warn!("Tray: Settings requested, but the GUI is unavailable");

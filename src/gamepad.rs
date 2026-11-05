@@ -25,7 +25,8 @@
 //! `hotkeys`, which never registers them. The action→mode map and the capture
 //! call are reused from `hotkeys`/`capture`, so the shot path is identical to
 //! the keyboard path (`capture::spawn_capture(CaptureCommand { mode, settings,
-//! toast })` — owned values, save on its own thread, spec §4.2).
+//! toast })` — owned values plus the toast handle read from the shared
+//! hand-off slot, save on its own thread, spec §4.2).
 //!
 //! LIVE settings (Stage 5 defect fix): the pump holds the **same settings
 //! mailbox Arc** the hotkey listener reads (created in `main`, published by UI
@@ -48,7 +49,7 @@
 //! the GUI by Arc) before the trigger path, and a PAD capture commits the first
 //! DOWN event instead of firing. The GUI never receives a callback (`emit` holds
 //! the observer mutex — callbacks must not re-emit), so it polls this mailbox in
-//! its logic pass, the same latest-only shape `overlay` and `hotkeys` use.
+//! its logic pass, the same latest-only shape `capture` and `hotkeys` use.
 //!
 //! Observer lifetime hazard (accepted library defect, plan Stage 2 note (a)):
 //! `gamepad::run` erases the observer reference into a process-wide static slot
@@ -83,13 +84,15 @@ use crate::bindings;
 use crate::bindings::Action;
 use crate::bindings::Debounce;
 use crate::bindings::PadBind;
+use crate::capture::ToastHandoff;
 use crate::config::Settings;
-use crate::overlay::ToastMailbox;
 
 // The shot path is Windows-only (there is no pad trigger to fire elsewhere),
 // so these imports are Windows-scoped too.
 #[cfg(windows)]
 use crate::capture::CaptureCommand;
+#[cfg(windows)]
+use crate::capture::handoff_handle;
 #[cfg(windows)]
 use crate::capture::spawn_capture;
 #[cfg(windows)]
@@ -166,7 +169,7 @@ pub(crate) struct PadCapture {
     captured: Option<PadDownEvent>,
 }
 
-/// The mailbox shape `hotkeys` (settings) and `overlay` (toast) already use:
+/// The mailbox shape `hotkeys` (settings) and `capture` (toast hand-off) use:
 /// an `Arc<Mutex<...>>` both sides consult, never a callback.
 pub(crate) type PadCaptureMailbox = Arc<Mutex<PadCapture>>;
 
@@ -175,7 +178,7 @@ pub(crate) fn new_capture_mailbox() -> PadCaptureMailbox {
     Arc::new(Mutex::new(PadCapture::default()))
 }
 
-/// Poisoned-lock recovery (same policy as `hotkeys`/`overlay`): a panicking
+/// Poisoned-lock recovery (same policy as `hotkeys`/`capture`): a panicking
 /// side leaves the stored state intact, so the hand-off keeps working.
 fn lock_capture(mailbox: &PadCaptureMailbox) -> MutexGuard<'_, PadCapture> {
     mailbox
@@ -362,7 +365,7 @@ fn pad_bind_count(mailbox: &Arc<Mutex<Settings>>) -> usize {
 #[cfg(windows)]
 pub(crate) fn spawn_pump(
     settings: Arc<Mutex<Settings>>,
-    toast: ToastMailbox,
+    handoff: ToastHandoff,
     gate: Arc<Mutex<Debounce>>,
     capture: PadCaptureMailbox,
 ) {
@@ -379,7 +382,7 @@ pub(crate) fn spawn_pump(
             previous: Mutex::new(HashMap::new()),
             capture,
             gate,
-            toast,
+            handoff,
         };
         let stop = AtomicBool::new(false);
         match gamepad::run(&observer, &stop) {
@@ -397,11 +400,11 @@ pub(crate) fn spawn_pump(
 #[cfg(not(windows))]
 pub(crate) fn spawn_pump(
     settings: Arc<Mutex<Settings>>,
-    toast: ToastMailbox,
+    handoff: ToastHandoff,
     gate: Arc<Mutex<Debounce>>,
     capture: PadCaptureMailbox,
 ) {
-    let _ = (toast, gate, capture);
+    let _ = (handoff, gate, capture);
     let configured = pad_bind_count(&settings);
     tracing::info!(
         "gameinput: not supported on this platform ({} pad bind(s) configured)",
@@ -427,7 +430,9 @@ struct PadObserver {
     capture: PadCaptureMailbox,
     /// Shared with the hotkey listener (spec §4.1 OR-fire, one gate).
     gate: Arc<Mutex<Debounce>>,
-    toast: ToastMailbox,
+    /// Latest-only toast-handle slot: read per shot, empty until the GUI
+    /// attaches the service handle (spec §4.3 hand-off).
+    handoff: ToastHandoff,
 }
 
 #[cfg(windows)]
@@ -536,8 +541,9 @@ impl PadObserver {
     }
 
     /// The shot path, identical to the hotkey listener's: reserved action or a
-    /// blocked trigger fires nothing; otherwise the same `spawn_capture`
-    /// command shape (`hotkeys.rs:431-437`) with the CURRENT mailbox settings.
+    /// blocked trigger fires nothing; otherwise the same `spawn_capture` call
+    /// (`hotkeys.rs` listener) with the CURRENT mailbox settings and the toast
+    /// handle read from the shared slot.
     fn fire(&self, action: Action) {
         let Some(mode) = capture_mode(action) else {
             return;
@@ -546,11 +552,13 @@ impl PadObserver {
             return;
         }
         tracing::info!("Screenshot fired from gamepad: {}", action.label());
-        spawn_capture(CaptureCommand {
-            mode,
-            settings: settings_now(&self.settings),
-            toast: self.toast.clone(),
-        });
+        spawn_capture(
+            CaptureCommand {
+                mode,
+                settings: settings_now(&self.settings),
+            },
+            handoff_handle(&self.handoff),
+        );
     }
 }
 

@@ -48,6 +48,13 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
 - **`unsafe` is forbidden** in project code: `#![forbid(unsafe_code)]` at the
   crate root. Third-party crates may contain unsafe internally; that is outside
   this rule.
+- **Documented exception:** `crates/overlay` uses `#![deny(unsafe_code)]` at the
+  crate root with a module-scoped `#![allow(unsafe_code)]` confined to
+  `crates/overlay/src/gl_boot.rs` — glutin/glutin-winit/glow expose context and
+  surface creation only as `unsafe fn` (no safe wrapper exists, and a nested
+  `allow` cannot relax `forbid`); every `unsafe` there is direct FFI into the
+  platform GL API, the same shape `crates/gamepad` uses. `crates/toast` keeps
+  `#![forbid(unsafe_code)]`, and the root `virshot` keeps `#![forbid(unsafe_code)]`.
 
 ## Build & environment
 
@@ -58,6 +65,10 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   `~/.cargo` is read-only, so bare `cargo` fails in the sandbox.
 - Temporary/scratch artifacts (screenshots, harnesses, logs) go only in `./.tmp/`;
   caches only in `./.cache/`; both are git-ignored, along with `target/`.
+- **Thread model:** exactly one winit `EventLoop` per process (winit 0.30 global
+  guard), so the overlay thread backend is used only in standalone processes and
+  examples; host apps (virshot) paint overlays via `OverlayHost` on eframe's loop,
+  and the toast timer thread is plain `std` (`recv_timeout`, no winit).
 - Gamepad trigger ships on Windows (task `2026-11-03_gamepad-integration`,
   2026-11-04): the trigger is the global keyboard hotkey **OR** a pad button —
   both sources fire through one shared ~250 ms debounce gate
@@ -83,16 +94,37 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
 ## Dependencies
 
 - **Language:** Rust (latest stable, rust version 1.99.1).
-- **UI and overlay:** `eframe` + `egui` (multi-viewport for the settings window and overlay).
+- **UI and overlay:** the settings window is `eframe` + `egui`; overlay and toast
+  live in path-dep crates (task `2026-11-04_overlay-toast`, 2026-11-04):
+  `crates/overlay` — low-level overlay windows, a winit/glutin/`glow` thread
+  backend (`src/gl_boot.rs` GL bootstrap, transparent / decoration-less /
+  always-on-top / content-protected / click-through) plus the host backend
+  `OverlayHost`, which paints overlays as egui multi-viewports on the host loop;
+  `crates/toast` — toast rules on a plain `std` timer thread driving a
+  `ToastSink` over overlay handles, with the non-blocking `ToastHandle` facade.
+  Root manifest path deps `overlay = { path = "crates/overlay" }` and
+  `toast = { path = "crates/toast" }` (all platforms). Stack:
+  `egui`/`eframe`/`egui-winit`/`egui_glow`/`winit`/`glow`/`glutin`/`glutin-winit`/
+  `image`/`thiserror` — all versions are already locked in `Cargo.lock` via
+  eframe's transitive deps and were approved by the user during task
+  `2026-11-04_overlay-toast`; **no new crates.io packages** were added beyond
+  that approved set.
 - **Gamepad:** shipped on Windows (2026-11-04, task
   `2026-11-03_gamepad-integration`) — path dep
   `gamepad = { path = "crates/gamepad" }` under
   `[target."cfg(windows)".dependencies]`; **zero crates.io deps** — the backend is
   a hand-written `gameinput.dll` COM shim, so the earlier `windows` crate plan
   (`RawGameController`) was superseded and **no new crates.io dependency was
-  added** (nothing needed approval). `crates/gamepad` is deliberately **not** a
-  workspace member (the root manifest declares no `[workspace]`); build/test it
-  from its own directory (`cd crates/gamepad && ../../cargo.sh test`). The
+  added** (nothing needed approval). **Workspace layout:** the root manifest
+  declares `[workspace] members = [".", "crates/overlay", "crates/toast",
+  "crates/gamepad"]` with `exclude = ["hidpad-poc"]` (gamepad made an explicit
+  member by the user on 2026-11-04; cargo also auto-adds path-dep members —
+  `exclude` cannot veto a path dependency), so `crates/gamepad` **is**
+  a workspace member (`./cargo.sh clippy --workspace --all-targets` compiles
+  it); it stays standalone-buildable from its own directory as before
+  (`cd crates/gamepad && ../../cargo.sh test`). `hidpad-poc` gained an empty
+  `[workspace]` table in its manifest so its standalone build keeps working
+  under the new root workspace. The
   `windows` crate present in `Cargo.lock` is transitive via **`xcap` 0.9.8** —
   winit uses `windows-sys`, not `windows`. Linux `gilrs` stays out of scope (see
   Build & environment for the hardware finding); a Linux backend, if ever added,
@@ -140,7 +172,7 @@ MinGW-w64 only; the Linux `xcap` chain needs `libudev-dev`, `libwayland-dev`,
   README via crates.io API `content` or GitHub raw. Verify by building — not by
   memory.
 
-## Best practices
+## Rust Best Practices
 
 - **Errors are values, not panics.** Functions that can fail return `Result`;
   their doc comments state the failure mode. No `unwrap()`/`expect()` outside
@@ -156,6 +188,49 @@ MinGW-w64 only; the Linux `xcap` chain needs `libudev-dev`, `libwayland-dev`,
   `<unit>_<scenario>_<expectation>`.
 - **Thread boundary**: capture runs on a spawned thread; communicate by owned
   values or channels, not by shared `Mutex` state.
+
+### Ownership & Cloning
+
+- **Justify every `.clone()`.** Prefer move → borrow → clone, in that order.
+  Clone only when the original must remain valid and borrowing is impossible
+  (e.g., a `'static` bound, transfer to another thread/task, or shared ownership
+  in multiple places).
+- **Do not derive `Clone` by default.** Derive it only for value types and cheap
+  handles. Never derive `Clone` on types holding unique resources (connections,
+  file descriptors, mutable state).
+- **Never call `.clone()` twice on the same value** in a single scope, and never
+  clone a value that is dropped shortly after.
+
+### `Arc` and Shared State
+- **`Arc` is for shared ownership, not for making clones cheap.** Use it when a
+  value must be owned in multiple places simultaneously, especially under a
+  `'static` requirement (`tokio::spawn`, `std::thread::spawn`, callbacks).
+- **Do not wrap already-shared types in `Arc`.** `Sender<T>`, `Receiver<T>`,
+  `Arc<T>`, and `Rc<T>` already clone in O(1).
+- **Prefer `Arc<Inner>` over `Arc<WholeStruct>`** unless the struct is logically
+  a single unit.
+- **Prefer channels over `Arc<Mutex<T>>`** for communication between tasks. Use a
+  mutex only for genuinely shared mutable state.
+- Small values (`u64`, short `String`, `Option<Handle>`) do not benefit from
+  `Arc`; clone them directly if needed.
+
+### Signatures
+- **Take `&T` when the callee only reads.** Take `T` by value only when ownership
+  is actually transferred or consumed.
+- If a function owns one part of a value and borrows another, **destructure it at
+  the start** rather than cloning.
+
+### Struct Design
+- **Separate concerns in command/config structs.** Do not mix "what to do" with
+  "where to report" — a notification handle belongs in a separate parameter, not
+  inside the request struct.
+- Apply `#[derive(Clone)]` only where a real consumer exists in the codebase.
+
+### Errors & Safety
+- Return `Result<T, E>` with a project-defined `Error` type. Do not panic in
+  library or application code paths that can fail.
+- Callers are responsible for logging; library functions must not swallow errors
+  silently.
 
 ## Scope guard
 

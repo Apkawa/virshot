@@ -3,6 +3,16 @@ name = "virshot"
 version = "0.1.0"
 edition = "2024"
 
+# Workspace (overlay/toast plan Stage 1): the root package stays the shipped
+# binary; `crates/overlay` (low-level overlay window library) and `crates/toast`
+# (toast notifications on top of it) join as members. `crates/gamepad` and
+# `hidpad-poc` are explicitly `exclude`d so they keep standing alone as before —
+# the Windows-only GameInput shim and the historical PoC are never compiled by
+# the Linux gate.
+[workspace]
+members = [".", "crates/overlay", "crates/toast", "crates/gamepad"]
+exclude = [ "hidpad-poc"]
+
 [dependencies]
 xcap = { version = "0.9.8", features = ["wgc"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
@@ -29,6 +39,16 @@ global-hotkey = "0.9.0"
 # (`src/backend/win_cid.rs`), Linux the XDG portal with a zenity fallback. No
 # async/tokio feature is enabled — verified in the locked 0.17.2 source.
 rfd = "0.17.2"
+
+# Overlay + toast (overlay/toast plan Stage 4): path deps on the workspace
+# members `crates/overlay` (overlay windows — the host-loop backend paints toast
+# chips as child egui viewports of the settings window's loop) and `crates/toast`
+# (toast rules on a std timer thread, sink-driven backends). Both crates joined
+# the workspace in Stage 1 and are already in `Cargo.lock`; declaring them here
+# pulls no new crates.io entry — winit/glutin/egui/glow versions are the ones
+# eframe already locks.
+overlay = { path = "crates/overlay" }
+toast = { path = "crates/toast" }
 
 # Gamepad trigger on Windows (plan Stage 4, docs/spec.md §4.1 pad field): path
 # dep on `crates/gamepad` — the hand-written `gameinput.dll` COM shim extracted

@@ -69,12 +69,16 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
 ## 3. Технический стек
 
 - **Язык:** Rust (latest stable, rust version 1.99.1).
-- **UI и Оверлей:** `eframe` / `egui` (multi-viewport для окна настроек и оверлея).
-  Реализовано (Stage 8-9): тост — отдельный viewport (`show_viewport_deferred`),
+- **UI и Оверлей:** `eframe` / `egui` (multi-viewport для окна настроек и
+  оверлея). Реализовано (Stage 8-9, перенесено в крейты в Stage 4): тост живёт
+  в workspace-крейтах `crates/toast` (правила: `std`-таймер-поток, latest-wins,
+  fade-out) и `crates/overlay` (бэкенд `OverlayHost` поверх `egui::Context`
+  multi-viewport + чистая геометрия углов `place`). Плашка — дочерний viewport:
   transparency из ROOT-билдера (GL alpha), click-through (`mouse_passthrough`),
-  always-on-top; fade через `gamma_multiply`. `eframe` с `default-features=false,
-  features=["glow","default_fonts","x11","wayland"]` (accesskit-стэки выключены
-  для бюджета размера).
+  always-on-top, content-protected, показ после первой отрисовки. `eframe` с
+  `default-features=false, features=["glow","default_fonts","x11","wayland"]`
+  (accesskit-стэки выключены для бюджета размера). Оба крейты — path-deps,
+  новых crates.io зависимостей не добавлено (§4.3).
 - **Геймпад (Windows — реализовано, v5):** свой crate `crates/gamepad` —
   hand-written COM shim над экспортами `gameinput.dll` (zero deps — `windows`
   crate не добавлен), подключён как path-dep в
@@ -182,39 +186,78 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
 
 ### 4.3. Оверлей-уведомление (тост)
 
-- Одно окно-тост: **новый тост заменяет текущий** (не стек). Ровно **одно окно
-  на монитор**: закрытие старого и создание нового не пересекаются в одном кадре
-  (spawn откладывается на следующий кадр после `ViewportCommand::Close`, иначе
-  eframe создаёт новые окна до удаления старых и на экране два окна).
-- Прозрачное окно без decorations, always-on-top, **mouse passthrough**
-  (клики проходят в игру). Реализация: egui multi-viewport (Stage 9). Ограничения
-  платформ: Wayland — позиция и always-on-top игнорируются (композиционер),
-  passthrough работает; X11 — transparency только при создании окна.
-- Fade in/out фиксированные ~250 мс; удержание = `duration_ms` (дефолт 2000 мс);
-  ошибки держатся ~3000 мс.
-- Позиция: 4 угла экрана (`position = TopLeft|TopRight|BottomLeft|BottomRight`),
-  фиксированные отступы: 30 px от вертикальной границы, 60 px от горизонтальной
-  (эмпирически, по образцу tk-референса; нижние углы — над панелью задач ~48 px;
-  `windows-sys`/rcWork отклонён user — unsafe).
-- Показ: настройка `on_all_monitors` (дефолт `true`) — тост на **каждом**
-  мониторе (геометрия мониторов — `xcap::Monitor::all()`), угол тот же для всех;
-  `false` — только монитор захвата/primary. Тост срабатывает **только после
-  скриншота** (успех/ошибка захвата-сохранения), не на хоткей-событие.
-  Показ/позиция — INFO-лог для диагностики на Windows.
-- **Видимость (доработки v4):** плашка рисуется с первого кадра (без fade-in
-  ramp'а, оставляющего пустое окно). Внутренний цвет viewport в egui 0.37
-  задать нельзя (`ViewportBuilder` не имеет поля/метода inner-color), поэтому
-  белая «тень» DWM до первой отрисовки убирается иначе: окно тоста создаётся
-  **скрытым** (`with_visible(false)`, `with_active(false)` — показ без захвата
-  фокуса), рисуется, пока скрыто (`RequestPaintWhileHidden`), и показывается
-  `ViewportCommand::Visible(true)` **только после первой отрисовки**.
-- **Рабочая область (доработки v4):** на Windows позиция учитывает панель задач
-  — используется рабочая область монитора (`GetMonitorInfo.rcWork`, прямой
-  cfg-gated dep `windows-sys` — в lock уже есть; требует явного одобрения
-  пользователя). Не-Windows: полный rect монитора.
-- Содержимое (англ.): успех — `Saved: <имя файла>` (полный путь — в лог);
-  ошибка — текст ошибки. Ошибки показываются **даже при `overlay.enabled = false`**.
-
+- Реализация (Stage 4, план overlay/toast): машинерия тоста вынесена в
+  workspace-крейты — `crates/toast` (правила тоста на `std`-таймер-потоке:
+  `ToastService`, `ToastHandle`, latest-wins) и `crates/overlay` (бэкенд
+  хост-цикла `OverlayHost` поверх `egui::Context` multi-viewport + чистая
+  геометрия углов `place`). Собственный модуль `src/overlay.rs` и весь
+  toast-код в `src/gui.rs` удалены; правила ниже не изменились.
+- **Владелец:** `SettingsApp` хранит `overlay::OverlayHost` и
+  `toast::ToastService`; оба создаются в `create`-замыкании eframe в `gui::run`
+  и живут до конца цикла. Порядок объявления полей — сервис **до** хоста:
+  `Drop` сервиса (Quit + join потока, закрытие плашек) выполняется, пока хост
+  ещё жив.
+- **Передача handle:** `capture::ToastHandoff` — latest-only слот
+  `Arc<Mutex<Option<ToastHandle>>>`. `gui::run` заполняет его в `create`;
+  потоки-триггеры (хоткеи, геймпад, трей) читают слот на каждый захват.
+  Handle передаётся capture **отдельным параметром** `run_capture`/`spawn_capture`,
+  а не внутри `CaptureCommand`. Пустой слот (headless `virshot shot`, либо
+  захват до/после GUI) — уведомления нет: CLI печатает путь в stdout и пишет
+  результат в лог.
+- **Рисование:** плашка — дочерний egui-viewport, созданный бэкендом:
+  прозрачное окно без decorations, always-on-top, **mouse passthrough**
+  (клики проходят в игру), **content-protected**. Окно создаётся скрытым
+  (`with_visible(false)`, `with_active(false)` — показ без захвата фокуса),
+  рисуется пока скрыто (`RequestPaintWhileHidden`) и показывается
+  `Visible(true)` только после первой отрисовки — белой «тени» DWM нет.
+  `OverlayHost::update(&ctx)` вызывается из `App::logic`, поэтому плашки
+  появляются и гаснут и при скрытом окне настроек (на скрытом окне eframe
+  выполняет `Context::run_logic`, чей `LogicOutput` содержит команды всех
+  viewport'ов). Ограничения платформ те же: Wayland — позиция и always-on-top
+  игнорируются (композиционер), passthrough работает; X11 — transparency только
+  при создании окна.
+- **Click-through на Windows игнорируется** в обоих бэкендах (`OverlayHost`
+  и thread-бэкенд): winit 0.30.13 `set_cursor_hittest(false)` добавляет
+  `WS_EX_LAYERED` без `SetLayeredWindowAttributes` — окно без layered-атрибутов
+  не композитится (плашка не рисуется вовсе), поэтому флаг гасится на Windows
+  (`cfg!(windows)`). Плашка не интерактивна — потеря passthrough безвредна.
+  На Linux/macOS passthrough работает (X11 — input-shape).
+- **Замена:** новый тост заменяет текущий (не стек), ровно одна плашка на
+  монитор; spawn/закрытие выполняет бэкенд, app не управляет окнами.
+- **Анимация:** fade-in отсутствует (плашка рисуется с полного непрозрачного
+  первого кадра), fade-out фиксированный ~250 мс; удержание = `duration_ms`
+  (дефолт 2000 мс); `duration_ms = 0` — плашка без авто-скрытия; ошибки
+  держатся ~3000 мс независимо от `duration_ms`.
+- **Позиция:** 4 угла экрана (`position = TopLeft|TopRight|BottomLeft|BottomRight`
+  → `overlay::Corner`), фиксированные отступы 30 px от вертикальной границы и
+  60 px от горизонтальной; нижние углы очищаются от панели задач запасом ~48 px.
+  Вся математика — `overlay::place` (константы `CORNER_INSET_X`,
+  `CORNER_INSET_Y`, `TASKBAR_CLEARANCE`); вариант с `GetMonitorInfo.rcWork`
+  (`windows-sys`) отклонён ранее — unsafe FFI.
+- **Мониторы:** геометрия берётся один раз при старте GUI на main-потоке —
+  `xcap::Monitor::all()` (никогда не в hot-path захвата), переведённая в
+  **LOGICAL точки** делением на `ctx.pixels_per_point()` (egui умножает
+  позицию/размер builder'а на масштаб), **primary — первым**. `on_all_monitors`
+  (дефолт `true`) → `MonitorSel::All` (тост на каждом мониторе, тот же угол);
+  `false` → `MonitorSel::Index(0)` (primary). Fan-out корректен: ровно одна
+  плашка на каждый монитор. Ошибка перечисления или пустой
+  список — WARN/лог, плашки не показываются, приложение живёт; геометрия
+  мониторов не обновляется при hotplug (снимок при старте). Debug-пример
+  `toast_debug` использует ту же конвенцию: перечисляет **все** мониторы
+  (`winit available_monitors()` ÷ `pixels_per_point()` корня) — раньше
+  перечислял только primary. Caveat mixed-DPI: все physical-rects делятся на
+  один root `pixels_per_point` — при разных DPI мониторов плашка на вторичном
+  мониторе может встать неверно (отдельное решение, вне этой задачи).
+- **Триггер:** тост срабатывает **только после скриншота** (успех
+  захвата-сохранения либо ошибка), не на хоткей-событие. Показ/мониторы —
+  INFO-лог для диагностики на Windows.
+- **Содержимое (англ.):** успех — `Saved: <имя файла>` (полный путь остаётся в
+  лог) с `ToastColor::Success`; ошибка — текст ошибки дословно с
+  `ToastColor::Danger`. Гейт прежний: успех показывается только при
+  `overlay.enabled = true`, ошибки показываются **даже при
+  `overlay.enabled = false`** (чистая функция `capture::should_show`).
+- Ключи конфига неизменны: `[overlay] enabled`, `position`, `duration_ms`,
+  `on_all_monitors`.
 ### 4.4. Окно настроек (GUI)
 
 - Обычное окно с рамкой; дефолтный размер ~720×520; позиция/размер не сохраняется.
@@ -283,20 +326,29 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
 Модель (итог — Stage 6-10):
 
 1. **Main Thread (UI + трей + регистрация хоткеев):** цикл `eframe` (окно
-   настроек + оверлей-тост; тост управляется этим же циклом), polling событий
-   трея каждый кадр, регистрация hotkeys (WM_HOTKEY thread-affinity, pump —
-   winit).
+   настроек + оверлей: `overlay::OverlayHost` и `toast::ToastService` владеет
+   `SettingsApp`, хост обновляется в logic-pass — плашки живут и при скрытом
+   окне), polling событий трея каждый кадр, регистрация hotkeys (WM_HOTKEY
+   thread-affinity, pump — winit). В `create`-замыкании handle сервиса
+   кладётся в `capture::ToastHandoff` (§4.3).
 2. **Input Thread (Hotkeys):** слушатель глобального receiver событий хоткеев →
-   debounce → команда (owned `CaptureCommand`) в capture-поток.
+   debounce → команда (owned `CaptureCommand`) + handle из `ToastHandoff`
+   (читается на каждый выстрел) в capture-поток.
    **Gamepad Pump Thread (Windows):** поток-помпа `gameinput.dll`
    (`crates/gamepad`) — события → diff масок состояний (0→1 edges) →
    сопоставление с `pad`-биндом → **тот же общий debounce-гейт** (~250 мс на
-   действие, §4.1) → та же команда в capture-поток. Связь с остальными
-   модулями — mailbox-ы без callback в GUI: settings-mailbox (живой конфиг
-   после Apply — re-bind выстреливает без перезапуска) и pad-capture mailbox
-   (§4.4). Поток резидентен на весь процесс (stop-флаг не выставляется —
+   действие, §4.1) → та же команда + тот же handle в capture-поток. Связь с
+   остальными модулями — mailbox-ы без callback в GUI: settings-mailbox (живой
+   конфиг после Apply — re-bind выстреливает без перезапуска) и pad-capture
+   mailbox (§4.4). Поток резидентен на весь процесс (stop-флаг не выставляется —
    parity с hotkeys-слушателем). На не-Windows хостах поток не запускается.
-3. **Capture Thread:** принимает команду, захватывает (monitor/window), сохраняет файл.
+3. **Capture Thread:** принимает команду, захватывает (monitor/window), сохраняет
+   файл; уведомление — через `ToastHandle` (отдельный параметр, не поле
+   команды); при `None` (headless CLI, либо захват без GUI) — только лог и
+   stdout.
+4. **Toast Timer Thread (`crates/toast`):** таймер-поток крейта — latest-wins,
+   удержание/fade-out, закрытие плашек через sink (`OverlayHostHandle`);
+   `Quit` + join при drop сервиса (поле app объявлено раньше хоста).
 
 Клавиатурные хоткеи: регистрация на main-тред (thread-affinity WM_HOTKEY на
 Windows; X11 pump — свой поток крейта на Linux), слушатель событий — отдельный
@@ -389,6 +441,16 @@ pad-бинда в UI — INFO.
   HID-геймпады отдают константный timestamp, поэтому нажатия не приходят
   (проверено на железе пользователя: pad vendor=1118 product=2835). На Linux
   геймпад-триггер не работает, поле `pad` в UI — disabled placeholder.
+- **Windows — mouse passthrough не поддерживается:** `set_cursor_hittest(false)`
+  (winit 0.30.13) добавляет `WS_EX_LAYERED` без `SetLayeredWindowAttributes`,
+  окно без layered-атрибутов не композитится, поэтому click-through на Windows
+  игнорируется в обоих бэкендах оверлея (см. §4.3). Плашка не интерактивна —
+  потеря passthrough безвредна; клики в игру на Windows не проходят.
+- **Transparency на Windows — hint, не гарантия:** известная проблема
+  прозрачных child-viewports на glow (egui#8423); после снятия `WS_EX_LAYERED`
+  (gate click-through выше) прозрачные плашки композитируются DWM.
+  `ContentProtected` на ре-композитированном окне — **Needs Windows-verification**
+  (приемка на железе пользователя).
 
 ### 9.x Сборка Windows (доработки v3)
 

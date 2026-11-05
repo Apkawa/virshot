@@ -1,0 +1,25 @@
+[package]
+name = "overlay"
+version = "0.1.0"
+edition = "2024"
+
+# Low-level overlay window library (overlay/toast plan Stage 1 skeleton; the
+# implementation lands in Stage 2). Dependency versions are the ones already
+# locked in Cargo.lock via eframe's transitive deps — no new crates.io entries.
+[dependencies]
+winit = "0.30"
+glutin = "0.32"
+glutin-winit = "0.5"
+glow = "0.17"
+egui = "0.37"
+# Same feature trim as the root manifest: the overlay thread drives its own
+# winit event loop, so egui-winit's winit feature is not needed here.
+egui-winit = { version = "0.37", default-features = false }
+egui_glow = "0.37"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+thiserror = "2"
+
+# Dev-only: eframe for Linux example runs. Features mirror the root manifest;
+# x11/wayland are unix-only, so they are not pulled on windows-gnu.
+[dev-dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }

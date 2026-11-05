@@ -111,9 +111,10 @@ use crate::bindings::ActionBinding;
 use crate::bindings::Debounce;
 use crate::capture::CaptureCommand;
 use crate::capture::CaptureMode;
+use crate::capture::ToastHandoff;
+use crate::capture::handoff_handle;
 use crate::capture::spawn_capture;
 use crate::config::Settings;
-use crate::overlay::ToastMailbox;
 
 /// Hotkey wiring failures, typed per module (`thiserror` enum). Registration
 /// failures are *not* errors here — they are reported per hotkey inside
@@ -193,8 +194,10 @@ impl HotkeysController {
     /// (main) thread**, register the active combos, and spawn the event
     /// listener thread. `mailbox` is the settings Arc `main` created — the
     /// listener clones it per trigger, the pad pump reads the same Arc, and
-    /// [`HotkeysController::apply`] publishes it. `toast` is the overlay
-    /// mailbox the listener attaches to every capture command; `debounce` is
+    /// [`HotkeysController::apply`] publishes it. `handoff` is the toast-handle
+    /// slot the listener reads per capture command (`capture::handoff_handle`)
+    /// — empty until the GUI attaches the `ToastService` handle, so a trigger
+    /// before the GUI simply captures without a chip; `debounce` is
     /// the trigger gate shared with the pad pump (`gamepad`), so keyboard and
     /// pad triggers of one action share one ~250 ms window.
     ///
@@ -206,7 +209,7 @@ impl HotkeysController {
     /// a controller.
     pub(crate) fn start(
         mailbox: Arc<Mutex<Settings>>,
-        toast: ToastMailbox,
+        handoff: ToastHandoff,
         debounce: Arc<Mutex<Debounce>>,
     ) -> Result<(Self, StartStatus), Error> {
         let settings = mailbox_settings(&mailbox).clone();
@@ -225,7 +228,7 @@ impl HotkeysController {
 
         spawn_listener(
             Arc::clone(&mailbox),
-            Arc::clone(&toast),
+            Arc::clone(&handoff),
             Arc::clone(&debounce),
         );
 
@@ -418,12 +421,13 @@ fn mailbox_settings(mailbox: &Arc<Mutex<Settings>>) -> MutexGuard<'_, Settings> 
 /// The listener thread (spec §6 Input Thread): blocks on the crate's global
 /// event receiver, dispatches debounced `Pressed` events into
 /// `capture::spawn_capture` with a fresh clone of the mailbox settings and the
-/// shared toast mailbox. The trigger gate is the SHARED `bindings::Debounce`
+/// toast handle read from the shared hand-off slot. The trigger gate is the
+/// SHARED `bindings::Debounce`
 /// (same instance the pad pump fires through, spec §4.1 OR-fire), the real
 /// clock is stamped at the module boundary (`chrono::Local::now`).
 fn spawn_listener(
     mailbox: Arc<Mutex<Settings>>,
-    toast: ToastMailbox,
+    handoff: ToastHandoff,
     debounce: Arc<Mutex<Debounce>>,
 ) {
     std::thread::spawn(move || {
@@ -450,11 +454,7 @@ fn spawn_listener(
             };
 
             if bindings::try_fire_shared(&debounce, action, Local::now()) {
-                spawn_capture(CaptureCommand {
-                    mode,
-                    settings,
-                    toast: Arc::clone(&toast),
-                });
+                spawn_capture(CaptureCommand { mode, settings }, handoff_handle(&handoff));
             }
         }
     });

@@ -13,7 +13,7 @@ fn luminance(pixel: [u8; 4]) -> u32 {
 fn camera_glyph_is_32x32_with_nonempty_pixels() {
     let rgba = camera_glyph_rgba();
     assert_eq!(rgba.len(), 32 * 32 * 4);
-    assert!(rgba.chunks_exact(4).any(|p| p[3] > 0));
+    assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
 }
 
 #[test]
