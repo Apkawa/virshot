@@ -109,14 +109,40 @@ fn fallback_reason(err: &Error) -> Option<&str> {
     }
 }
 
+/// Lenient normalization of a configured language value (spec §7): the value
+/// is accepted only when it matches a known locale code EXACTLY — `en`, `ru`,
+/// `zh-CN`, `es`, `ja`, `ko` (case-sensitive, no trimming: the settings-window
+/// dropdown writes these canonical codes, and locale keys in the catalog are
+/// case-sensitive). Anything else — empty, unknown, wrong case or padding, or
+/// `jp` (Japanese is `ja`) — normalizes to `"en"`. Lenient on purpose: a
+/// strict enum would fail the TOML parse and reset the whole config to
+/// defaults; this repairs only `general.language`. Returns a static code
+/// accepted by `rust_i18n::set_locale`.
+pub(crate) fn language_code(raw: &str) -> &'static str {
+    match raw {
+        "en" => "en",
+        "ru" => "ru",
+        "zh-CN" => "zh-CN",
+        "es" => "es",
+        "ja" => "ja",
+        "ko" => "ko",
+        _ => "en",
+    }
+}
+
 /// Load `path`, or fall back to the spec §7 [`Settings`] defaults when the
 /// file cannot be used. A parse failure or a non-missing I/O failure is logged
 /// with the full typed message (including the line for a parse error); a
 /// missing file is the normal first-run state and is not logged. Never fails,
-/// so the app loop can call it and keep running.
+/// so the app loop can call it and keep running. After a successful parse the
+/// loaded `general.language` is normalized through [`language_code`]: only the
+/// language value is repaired, every other setting is preserved.
 pub(crate) fn load_or_default(path: &Path) -> Settings {
     match load(path) {
-        Ok(settings) => settings,
+        Ok(mut settings) => {
+            settings.general.language = language_code(&settings.general.language).to_owned();
+            settings
+        }
         Err(err) => {
             if fallback_reason(&err).is_some() {
                 tracing::error!("config: {err}");
@@ -395,10 +421,12 @@ pub(crate) enum OverlayPosition {
     BottomRight,
 }
 
-/// Output directory, filename templates, image format, and encoder qualities.
+/// Output directory, filename templates, image format, encoder qualities, and
+/// the UI language (a locale code normalized by [`language_code`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct General {
+    pub(crate) language: String,
     pub(crate) save_path: String,
     pub(crate) file_full_screen: String,
     pub(crate) file_window: String,
@@ -420,6 +448,7 @@ impl Default for General {
 /// defaults are unit-tested without touching the process environment.
 fn general_with_home(home: Option<&Path>) -> General {
     General {
+        language: "en".to_owned(),
         save_path: default_save_path(home).display().to_string(),
         file_full_screen: "FullScreen/%y-%mo/%iso.%ext".to_owned(),
         file_window: "%t/%y-%mo/%t-%iso.%ext".to_owned(),

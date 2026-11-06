@@ -25,7 +25,9 @@
 //! outcome becomes a `toast::Toast` shown through the notification handle the
 //! caller passes to `run_capture`/`spawn_capture` — success carries
 //! `Saved: <file name>` (the full path stays in the log), failure carries the
-//! typed error's message. The handle comes from the resident GUI's
+//! localized chip wording of the typed error (catalog `toast.*`, spec §2; the
+//! `Error` `Display` stays English for logs and headless CLI output). The
+//! handle comes from the resident GUI's
 //! `toast::ToastService` (painted by `crates/overlay`'s host backend) and is
 //! read per trigger from [`ToastHandoff`]; a headless `virshot shot` run has
 //! no GUI and therefore no handle (`None`), so the notification is skipped and
@@ -59,20 +61,57 @@ use crate::config::Settings;
 use crate::template;
 
 /// Capture/save failures, typed per module (`thiserror` enum, no stringly
-/// `Err(String)`). Each variant keeps its underlying error as `source`.
+/// `Err(String)`). Each variant keeps its underlying error as `source`. The
+/// `Display` strings are the English contract for logs and headless CLI
+/// output (spec §2); the localized toast chip comes from [`chip_text`], not
+/// from `Display`. `xcap` sources are boxed because `XCapError` is a fat
+/// platform enum that would make the whole `Error` too large for `Result`.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
-    /// Monitor enumeration, monitor capture, window enumeration, or window
-    /// capture failed. Context lives in `message`; the `xcap` error is kept
-    /// as `source` whenever one was returned. Boxed because `XCapError` is a
-    /// fat platform enum that would make the whole `Error` too large for
-    /// `Result`.
-    #[error("{message}")]
-    Monitor {
-        message: String,
+    /// Capturing the monitor image failed; `reason` is the `xcap` error's
+    /// message, kept as `source` whenever one was returned.
+    #[error("failed to capture monitor image: {reason}")]
+    MonitorCaptureFailed {
+        reason: String,
         #[source]
         source: Option<Box<xcap::XCapError>>,
     },
+
+    /// Reading the foreground window's title failed.
+    #[error("failed to read window title: {reason}")]
+    WindowTitleFailed {
+        reason: String,
+        #[source]
+        source: Option<Box<xcap::XCapError>>,
+    },
+
+    /// Capturing the foreground window image failed.
+    #[error("failed to capture window image: {reason}")]
+    WindowCaptureFailed {
+        reason: String,
+        #[source]
+        source: Option<Box<xcap::XCapError>>,
+    },
+
+    /// Window enumeration failed (no display server / unsupported backend).
+    #[error("failed to list windows: {reason}")]
+    WindowListFailed {
+        reason: String,
+        #[source]
+        source: Option<Box<xcap::XCapError>>,
+    },
+
+    /// Monitor enumeration failed.
+    #[error("failed to list monitors: {reason}")]
+    MonitorListFailed {
+        reason: String,
+        #[source]
+        source: Option<Box<xcap::XCapError>>,
+    },
+
+    /// No monitor was found at all when one was needed.
+    #[error("no monitors found")]
+    NoMonitorsFound,
 
     /// Window mode with no focused foreign window (the desktop is visible):
     /// spec §4.2 requires exactly "no active window" in toast + log, and no
@@ -208,28 +247,79 @@ fn toast_duration_ms(overlay: &Overlay) -> u32 {
 }
 
 /// Success chip text (spec §4.3): `Saved: <file name>` only — the full path is
-/// in the log. A path with no usable file name shows the full path rather
-/// than an empty chip. `pub(crate)` because the Overlay tab's test chip
+/// in the log; the wording comes from catalog `toast.saved` (spec §2). A path
+/// with no usable file name shows the full path rather than an empty chip.
+/// `pub(crate)` because the Overlay tab's test chip
 /// (`gui::overlay_test_message`) builds the very same wording without a real
 /// save, so the test button cannot drift from this format.
 pub(crate) fn saved_text(path: &Path) -> String {
     match path.file_name() {
-        Some(name) => format!("Saved: {}", name.to_string_lossy()),
-        None => format!("Saved: {}", path.display()),
+        Some(name) => rust_i18n::t!("toast.saved", file_name = name.to_string_lossy()).into_owned(),
+        None => rust_i18n::t!("toast.saved", file_name = path.display()).into_owned(),
+    }
+}
+
+/// Localized chip wording for a capture failure (spec §2): every variant maps
+/// to a catalog `toast.*` key, so the chip text follows the UI locale while
+/// the `Error` `Display` impl stays English for logs and CLI headless output.
+/// The technical detail (`reason`) is the underlying error's English message —
+/// only the localized prefix/template comes from the catalog; under `en` the
+/// catalog values equal the `Display` strings byte-for-byte.
+pub(crate) fn chip_text(err: &Error) -> String {
+    match err {
+        Error::NoActiveWindow => rust_i18n::t!("toast.no_active_window").into_owned(),
+        Error::Template { source } => {
+            rust_i18n::t!("toast.template_invalid", reason = source.to_string()).into_owned()
+        }
+        Error::Save { path, source } => rust_i18n::t!(
+            "toast.save_failed",
+            path = path.display(),
+            reason = source.to_string()
+        )
+        .into_owned(),
+        Error::Io { path, source } => rust_i18n::t!(
+            "toast.dir_create_failed",
+            path = path.display(),
+            reason = source.to_string()
+        )
+        .into_owned(),
+        Error::TooManyCollisions { path, limit } => rust_i18n::t!(
+            "toast.too_many_collisions",
+            path = path.display(),
+            limit = limit
+        )
+        .into_owned(),
+        Error::MonitorCaptureFailed { reason, .. } => {
+            rust_i18n::t!("toast.monitor_capture_failed", reason = reason).into_owned()
+        }
+        Error::WindowTitleFailed { reason, .. } => {
+            rust_i18n::t!("toast.window_title_failed", reason = reason).into_owned()
+        }
+        Error::WindowCaptureFailed { reason, .. } => {
+            rust_i18n::t!("toast.window_capture_failed", reason = reason).into_owned()
+        }
+        Error::WindowListFailed { reason, .. } => {
+            rust_i18n::t!("toast.window_list_failed", reason = reason).into_owned()
+        }
+        Error::MonitorListFailed { reason, .. } => {
+            rust_i18n::t!("toast.monitor_list_failed", reason = reason).into_owned()
+        }
+        Error::NoMonitorsFound => rust_i18n::t!("toast.no_monitors_found").into_owned(),
     }
 }
 
 /// The chip for one capture outcome, or `None` when nothing is shown (success
 /// with `overlay.enabled = false`). Success is a `Success` chip, failure a
-/// `Danger` chip carrying the typed error's message verbatim — `crates/toast`
-/// holds `Danger` for its own error hold regardless of `duration_ms`.
+/// `Danger` chip carrying the localized wording of the typed error ([`chip_text`],
+/// spec §2) — `crates/toast` holds `Danger` for its own error hold regardless
+/// of `duration_ms`.
 fn toast_from_outcome(outcome: &Result<PathBuf, Error>, overlay: &Overlay) -> Option<Toast> {
     if !should_show(outcome, overlay) {
         return None;
     }
     let (text, color) = match outcome {
         Ok(path) => (saved_text(path), ToastColor::Success),
-        Err(err) => (err.to_string(), ToastColor::Danger),
+        Err(err) => (chip_text(err), ToastColor::Danger),
     };
     Some(Toast {
         monitor: monitor_sel(overlay.on_all_monitors),
@@ -323,25 +413,29 @@ fn capture_core(
                 }
             };
             let monitor = monitor_for_full_screen(foreground.as_ref())?;
-            let image = monitor.capture_image().map_err(|err| Error::Monitor {
-                message: format!("failed to capture monitor image: {err}"),
-                source: Some(Box::new(err)),
-            })?;
+            let image = monitor
+                .capture_image()
+                .map_err(|err| Error::MonitorCaptureFailed {
+                    reason: err.to_string(),
+                    source: Some(Box::new(err)),
+                })?;
             // Full-screen template renders `fullscreen` for `%t` (template
             // module), so the target carries no title.
             (image, None, general.file_full_screen.as_str())
         }
         CaptureMode::Window => {
             let window = foreground_window()?.ok_or(Error::NoActiveWindow)?;
-            let title = window.title().map_err(|err| Error::Monitor {
-                message: format!("failed to read window title: {err}"),
+            let title = window.title().map_err(|err| Error::WindowTitleFailed {
+                reason: err.to_string(),
                 source: Some(Box::new(err)),
             })?;
             // Occlusion-independent: xcap uses PrintWindow on Windows.
-            let image = window.capture_image().map_err(|err| Error::Monitor {
-                message: format!("failed to capture window image: {err}"),
-                source: Some(Box::new(err)),
-            })?;
+            let image = window
+                .capture_image()
+                .map_err(|err| Error::WindowCaptureFailed {
+                    reason: err.to_string(),
+                    source: Some(Box::new(err)),
+                })?;
             (image, Some(title), general.file_window.as_str())
         }
     };
@@ -390,8 +484,8 @@ fn pick_foreground(probes: &[WindowProbe], own_pid: u32) -> Option<usize> {
 /// and the full-screen primary fallback covers it. `Window::all()` returns
 /// windows z-ordered on both platforms.
 fn foreground_window() -> Result<Option<xcap::Window>, Error> {
-    let windows = xcap::Window::all().map_err(|err| Error::Monitor {
-        message: format!("failed to list windows: {err}"),
+    let windows = xcap::Window::all().map_err(|err| Error::WindowListFailed {
+        reason: err.to_string(),
         source: Some(Box::new(err)),
     })?;
     let probes: Vec<WindowProbe> = windows
@@ -420,8 +514,8 @@ fn monitor_for_full_screen(foreground: Option<&xcap::Window>) -> Result<xcap::Mo
             }
         }
     }
-    let monitors = xcap::Monitor::all().map_err(|err| Error::Monitor {
-        message: format!("failed to list monitors: {err}"),
+    let monitors = xcap::Monitor::all().map_err(|err| Error::MonitorListFailed {
+        reason: err.to_string(),
         source: Some(Box::new(err)),
     })?;
     if let Some(monitor) = monitors
@@ -431,10 +525,7 @@ fn monitor_for_full_screen(foreground: Option<&xcap::Window>) -> Result<xcap::Mo
         return Ok(monitor.clone());
     }
     // `is_primary()` errored for every monitor: take the first, as before.
-    monitors.into_iter().next().ok_or_else(|| Error::Monitor {
-        message: "no monitors found".to_owned(),
-        source: None,
-    })
+    monitors.into_iter().next().ok_or(Error::NoMonitorsFound)
 }
 
 /// Upper bound for the collision scan (spec §4.2 counter suffix): reaching

@@ -1,0 +1,560 @@
+_version: 2
+
+# Single rust-i18n catalog (spec §2): all localized texts in one file,
+# `_version: 2` — every dotted key carries its locale blocks below it.
+# `en` holds the exact English wording the source uses today (byte-for-byte);
+# `ru` lands in Stage 3, zh-CN/es/ja/ko in Stage 4. `%{name}` placeholders are
+# interpolated by `rust_i18n::t!(key, name = value)`.
+
+# Settings window — tab headers (gui::Tab::label).
+general.tab_general:
+  en: General
+  ru: "Общие"
+  zh-CN: 通用
+  es: Generales
+  ja: 一般
+  ko: 일반
+general.tab_hotkeys:
+  en: Hotkeys
+  ru: "Горячие клавиши"
+  zh-CN: 快捷键
+  es: Atajos
+  ja: ショートキー
+  ko: 단축키
+general.tab_overlay:
+  en: Overlay
+  ru: "Оверлей"
+  zh-CN: 悬浮提示
+  es: Superposición
+  ja: オーバーレイ
+  ko: 오버레이
+
+# Settings window — General tab rows (gui::SettingsApp::general_tab) and the
+# placeholder reference descriptions (template::TOKENS).
+general.save_path_label:
+  en: Save path
+  ru: "Путь сохранения"
+  zh-CN: 保存路径
+  es: Ruta de guardado
+  ja: 保存パス
+  ko: 저장 경로
+general.browse_button:
+  en: Browse
+  ru: "Обзор"
+  zh-CN: 浏览
+  es: Explorar
+  ja: 参照
+  ko: 찾아보기
+general.full_screen_label:
+  en: Full-screen template
+  ru: "Шаблон полного экрана"
+  zh-CN: 全屏模板
+  es: Plantilla de pantalla completa
+  ja: フルスクリーンテンプレート
+  ko: 전체 화면 템플릿
+general.window_label:
+  en: Window template
+  ru: "Шаблон окна"
+  zh-CN: 窗口模板
+  es: Plantilla de ventana
+  ja: ウィンドウテンプレート
+  ko: 창 템플릿
+general.placeholder_reference_header:
+  en: Placeholder reference
+  ru: "Справочник подстановок"
+  zh-CN: 占位符参考
+  es: Referencia de marcadores de posición
+  ja: プレースホルダー一覧
+  ko: 자리 표시자 참고
+general.placeholder_desc_year:
+  en: 4-digit year
+  ru: "год, 4 цифры"
+  zh-CN: 4位年份
+  es: Año, 4 dígitos
+  ja: 西暦、4桁
+  ko: 연도, 4자리
+general.placeholder_desc_year_short:
+  en: 2-digit year
+  ru: "год, 2 цифры"
+  zh-CN: 2位年份
+  es: Año, 2 dígitos
+  ja: 西暦、2桁
+  ko: 연도, 2자리
+general.placeholder_desc_month:
+  en: month, zero-padded (01-12)
+  ru: "месяц, с ведущим нулём (01-12)"
+  zh-CN: 月份，补零 (01-12)
+  es: mes, con cero inicial (01-12)
+  ja: 月、ゼロ埋め (01-12)
+  ko: 월, 0 패딩 (01-12)
+general.placeholder_desc_day:
+  en: day of month, zero-padded
+  ru: "день месяца, с ведущим нулём"
+  zh-CN: 当月日，补零
+  es: día del mes, con cero inicial
+  ja: 日、ゼロ埋め
+  ko: 월의 날, 0 패딩
+general.placeholder_desc_hour:
+  en: hour, 24-hour clock, zero-padded
+  ru: "час, 24-часовой формат, с ведущим нулём"
+  zh-CN: 小时，24小时制，补零
+  es: hora, formato 24 horas, con cero inicial
+  ja: 時、24時間形式、ゼロ埋め
+  ko: 시, 24시간제, 0 패딩
+general.placeholder_desc_minute:
+  en: minute, zero-padded
+  ru: "минута, с ведущим нулём"
+  zh-CN: 分钟，补零
+  es: minuto, con cero inicial
+  ja: 分、ゼロ埋め
+  ko: 분, 0 패딩
+general.placeholder_desc_second:
+  en: second, zero-padded
+  ru: "секунда, с ведущим нулём"
+  zh-CN: 秒，补零
+  es: segundo, con cero inicial
+  ja: 秒、ゼロ埋め
+  ko: 초, 0 패딩
+general.placeholder_desc_iso:
+  en: local date and time, like 2026-11-03_00-12-05
+  ru: "местные дата и время, например 2026-11-03_00-12-05"
+  zh-CN: 本地日期和时间，示例 2026-11-03_00-12-05
+  es: fecha y hora locales, como 2026-11-03_00-12-05
+  ja: ローカルの日付と時刻、例 2026-11-03_00-12-05
+  ko: 로컬 날짜 및 시간, 예 2026-11-03_00-12-05
+general.placeholder_desc_title:
+  en: "window title; \"fullscreen\" for full-screen shots, max 60 chars"
+  ru: "название окна; \"fullscreen\" для полноэкранных снимков, максимум 60 символов"
+  zh-CN: "窗口标题；全屏截图时为 \"fullscreen\"，最长 60 个字符"
+  es: "título de la ventana; \"fullscreen\" para capturas de pantalla completa, máx. 60 caracteres"
+  ja: "ウィンドウタイトル; フルスクリーン撮影では \"fullscreen\", 最大 60 文字"
+  ko: "창 제목; 전체 화면 캡처는 \"fullscreen\", 최대 60자"
+general.placeholder_desc_counter:
+  en: collision counter, normally 1
+  ru: "счётчик совпадений, обычно 1"
+  zh-CN: 冲突计数器，通常为 1
+  es: contador de colisiones, normalmente 1
+  ja: 衝突カウンター、通常 1
+  ko: 충돌 카운터, 일반적으로 1
+general.placeholder_desc_ext:
+  en: extension without dot, e.g. png
+  ru: "расширение без точки, например png"
+  zh-CN: 不带点的扩展名，例如 png
+  es: extensión sin punto, p. ej. png
+  ja: ドットなしの拡張子、例 png
+  ko: 점 없는 확장자, 예 png
+general.format_label:
+  en: Format
+  ru: "Формат"
+  zh-CN: 格式
+  es: Formato
+  ja: 形式
+  ko: 형식
+general.jpeg_quality_label:
+  en: JPEG quality
+  ru: "Качество JPEG"
+  zh-CN: JPEG 质量
+  es: Calidad JPEG
+  ja: JPEG 品質
+  ko: JPEG 품질
+general.webp_quality_label:
+  en: "WebP quality (WebP is lossless in MVP — quality not applied yet)"
+  ru: "Качество WebP (WebP в MVP без потерь — качество пока не применяется)"
+  zh-CN: "WebP 质量（WebP 在 MVP 中为无损 — 质量尚未应用）"
+  es: "Calidad WebP (WebP es sin pérdidas en el MVP — la calidad aún no se aplica)"
+  ja: "WebP 品質 (WebP は MVP で可逆 — 品質はまだ適用されていません)"
+  ko: "WebP 품질 (MVP에서 WebP는 무손실 — 품질은 아직 적용되지 않음)"
+general.template_title_default:
+  en: fullscreen
+  ru: "полноэкранный"
+  zh-CN: 全屏
+  es: pantalla completa
+  ja: フルスクリーン
+  ko: 전체 화면
+# NEW label for the language dropdown (Stage 2); no source literal yet.
+general.language_label:
+  en: Language
+  ru: "Язык"
+  zh-CN: 语言
+  es: Idioma
+  ja: 言語
+  ko: 언어
+
+# Settings window — bottom bar buttons and the window title (gui::run).
+bottom.cancel:
+  en: Cancel
+  ru: "Отмена"
+  zh-CN: 取消
+  es: Cancelar
+  ja: キャンセル
+  ko: 취소
+bottom.ok:
+  en: OK
+  ru: "OK"
+  zh-CN: "OK"
+  es: "OK"
+  ja: "OK"
+  ko: "OK"
+bottom.apply:
+  en: Apply
+  ru: "Применить"
+  zh-CN: 应用
+  es: Aplicar
+  ja: 適用
+  ko: 적용
+bottom.unsaved_changes:
+  en: Unsaved changes
+  ru: "Не сохранённые изменения"
+  zh-CN: 未保存的更改
+  es: Cambios sin guardar
+  ja: 未保存の変更
+  ko: 저장되지 않은 변경
+bottom.window_title:
+  en: "virshot — Settings"
+  ru: "virshot — Настройки"
+  zh-CN: "virshot — 设置"
+  es: "virshot — Ajustes"
+  ja: "virshot — 設定"
+  ko: "virshot — 설정"
+
+# Hotkeys tab — labels, hints, tooltips, and registration failure reasons
+# (gui.rs constants + hotkeys::failure_reason).
+hotkey.bind_hint:
+  en: Esc to cancel, Backspace to clear
+  ru: "Esc — отмена, Backspace — очистить"
+  zh-CN: Esc 取消，Backspace 清除
+  es: Esc para cancelar, Backspace para limpiar
+  ja: Esc でキャンセル、Backspace でクリア
+  ko: Esc 취소, Backspace 지우기
+hotkey.unassigned:
+  en: "unbound — click to bind"
+  ru: "не назначено — нажмите, чтобы назначить"
+  zh-CN: "未绑定 — 点击以绑定"
+  es: "sin asignar — clic para asignar"
+  ja: "未割り当て — クリックして割り当て"
+  ko: "미할당 — 클릭하여 할당"
+hotkey.pad_label:
+  en: "pad — click to bind"
+  ru: "геймпад — нажмите, чтобы назначить"
+  zh-CN: "手柄 — 点击以绑定"
+  es: "gamepad — clic para asignar"
+  ja: "ゲームパッド — クリックして割り当て"
+  ko: "게임패드 — 클릭하여 할당"
+hotkey.already_registered:
+  en: "already registered by another application (%{combo} is held elsewhere) — free that key or pick another"
+  ru: "уже зарегистрировано другим приложением (%{combo} занят) — освободите эту клавишу или выберите другую"
+  zh-CN: "已被其他应用注册（%{combo} 已被占用）— 释放该键或另选一个"
+  es: "ya registrado por otra aplicación (%{combo} está ocupado en otro lugar) — libera esa tecla o elige otra"
+  ja: "別のアプリに登録済み (%{combo} は他で使用されています) — そのキーを解放するか別のキーを選択"
+  ko: "다른 앱에 이미 등록됨 (%{combo}가 다른 곳에서 사용 중) — 해당 키를 해제하거나 다른 키를 선택"
+hotkey.registration_failed:
+  en: "registration failed: %{reason}"
+  ru: "не удалось зарегистрировать: %{reason}"
+  zh-CN: 注册失败：%{reason}
+  es: "no se pudo registrar: %{reason}"
+  ja: "登録に失敗: %{reason}"
+  ko: "등록 실패: %{reason}"
+hotkey.capture_button_label:
+  en: "Press keys…"
+  ru: "Нажмите клавиши…"
+  zh-CN: "按键…"
+  es: "Presiona teclas…"
+  ja: "キーを入力…"
+  ko: "키 입력…"
+hotkey.capture_tooltip:
+  en: "Press a key combo to bind it — Esc to cancel."
+  ru: "Нажмите сочетание клавиш, чтобы назначить его — Esc отменит."
+  zh-CN: "按下键组合以绑定 — Esc 可取消。"
+  es: "Pulsa una combinación de teclas para asignarla — Esc la cancela."
+  ja: "キーの組み合わせを押して割り当て — Esc でキャンセルできます。"
+  ko: "키 조합을 눌러 할당 — Esc로 취소할 수 있습니다."
+hotkey.reserved_tooltip:
+  en: "reserved — out of MVP scope"
+  ru: "зарезервировано — вне объёма MVP"
+  zh-CN: "已保留 — 超出 MVP 范围"
+  es: "reservado — fuera del alcance del MVP"
+  ja: "予約済み — MVP の範囲外"
+  ko: "예약됨 — MVP 범위 밖"
+hotkey.bind_all_hint:
+  en: "Bind a key on every row before saving — Backspace clears a binding"
+  ru: "Назначьте клавишу во каждой строке перед сохранением — Backspace очищает назначение"
+  zh-CN: "保存前为每行绑定一个键 — Backspace 清除绑定"
+  es: "Asigna una tecla en cada fila antes de guardar — Backspace limpia una asignación"
+  ja: "保存前に各行へキーを割り当て — Backspace で割り当てを解除"
+  ko: "저장 전 모든 줄에 키를 할당 — Backspace가 할당을 지웁니다"
+hotkey.duplicate_tooltip:
+  en: "Duplicate binding: one combo or pad button must trigger only one action — re-bind one of the rows"
+  ru: "Дублирование: одна комбинация или кнопка геймпада должна запускать только одно действие — переназначьте одну из строк"
+  zh-CN: "重复绑定：一个组合或手柄按钮只能触发一个动作 — 请重新绑定其中一行"
+  es: "asignación duplicada: una combinación o botón del gamepad debe lanzar solo una acción — reasigna una de las filas"
+  ja: "重複割り当て: 1つの組み合わせまたはパッドボタンは1つの動作のみ起動 — いずれかの行を再割り当て"
+  ko: "중복 할당: 하나의 조합 또는 패드 버튼은 하나의 동작만 실행 — 한 줄을 다시 할당"
+hotkey.unavailable_label:
+  en: Hotkeys unavailable on this host (see log)
+  ru: "Горячие клавиши недоступны на этом хосте (см. журнал)"
+  zh-CN: 此主机上快捷键不可用（见日志）
+  es: Atajos no disponibles en este host (ver el registro)
+  ja: このホストではショートキーを使用できません (ログ参照)
+  ko: 이 호스트에서 단축키를 사용할 수 없음 (로그 참조)
+hotkey.duplicate_error:
+  en: "Duplicates %{row}: %{combo}"
+  ru: "Дублирование %{row}: %{combo}"
+  zh-CN: 重复 %{row}：%{combo}
+  es: "Duplicados %{row}: %{combo}"
+  ja: "重複 %{row}: %{combo}"
+  ko: "중복 %{row}: %{combo}"
+hotkey.duplicate_pad_error:
+  en: "Duplicates %{row} pad: %{pad}"
+  ru: "Дублирование %{row}, геймпад: %{pad}"
+  zh-CN: 重复 %{row} 手柄：%{pad}
+  es: "Duplicados %{row} gamepad: %{pad}"
+  ja: "重複 %{row} パッド: %{pad}"
+  ko: "중복 %{row} 패드: %{pad}"
+hotkey.row_full_screen:
+  en: Full screen
+  ru: "Полный экран"
+  zh-CN: 全屏
+  es: Pantalla completa
+  ja: フルスクリーン
+  ko: 전체 화면
+hotkey.row_window:
+  en: Window
+  ru: "Окно"
+  zh-CN: 窗口
+  es: Ventana
+  ja: ウィンドウ
+  ko: 창
+hotkey.row_rect:
+  en: Rect area
+  ru: "Прямоугольная область"
+  zh-CN: 矩形区域
+  es: Área rectangular
+  ja: 矩形領域
+  ko: 사각형 영역
+
+# Gamepad slot in the hotkey grid (gui.rs pad-field constants, Windows only).
+gamepad.capture_button_label:
+  en: "Press a button…"
+  ru: "Нажмите кнопку…"
+  zh-CN: "按下按钮…"
+  es: "Presiona un botón…"
+  ja: "ボタンを押して…"
+  ko: "버튼을 누르세요…"
+gamepad.capture_tooltip:
+  en: "Press a gamepad button to bind it — Esc to cancel, Backspace to clear; click again to cancel."
+  ru: "Нажмите кнопку геймпада, чтобы назначить её — Esc отменит, Backspace очистит; повторный клик отменит."
+  zh-CN: "按下手柄按钮以绑定 — Esc 取消，Backspace 清除；再次点击取消。"
+  es: "Pulsa un botón del gamepad para asignarlo — Esc cancela, Backspace limpia; otro clic cancela."
+  ja: "ゲームパッドのボタンを押して割り当て — Esc でキャンセル、Backspace でクリア; 再クリックでキャンセル。"
+  ko: "게임패드 버튼을 눌러 할당 — Esc로 취소, Backspace로 지우기; 다시 클릭하면 취소됩니다."
+gamepad.bind_tooltip:
+  en: "Gamepad trigger (fires together with the hotkey) — click to bind"
+  ru: "Триггер геймпада (срабатывает вместе с горячей клавишей) — нажмите, чтобы назначить"
+  zh-CN: "手柄触发（与快捷键同时触发）— 点击以绑定"
+  es: "Trigger del gamepad (se dispara con el atajo) — clic para asignar"
+  ja: "ゲームパッドトリガー (ショートキーと同時に発火) — クリックして割り当て"
+  ko: "게임패드 트리거 (단축키와 함께 실행) — 클릭하여 할당"
+gamepad.windows_only_note:
+  en: "(gamepad — Windows only)"
+  ru: "(геймпад — только Windows)"
+  zh-CN: "(手柄 — 仅 Windows)"
+  es: "(gamepad — solo Windows)"
+  ja: "(ゲームパッド — Windows のみ)"
+  ko: "(게임패드 — Windows 전용)"
+
+# Overlay tab rows and test-button hint (gui::SettingsApp::overlay_tab).
+overlay.enabled_label:
+  en: Show overlay toast
+  ru: "Показывать всплывающее уведомление"
+  zh-CN: 显示悬浮提示
+  es: Mostrar superposición
+  ja: オーバーレイを表示
+  ko: 오버레이 표시
+overlay.test_button:
+  en: Test overlay
+  ru: "Тест оверлея"
+  zh-CN: 测试悬浮提示
+  es: Probar superposición
+  ja: オーバーレイテスト
+  ko: 오버레이 테스트
+overlay.test_disabled_hint:
+  en: Enable the overlay toast to test it
+  ru: "Включите всплывающее уведомление, чтобы протестировать его"
+  zh-CN: 启用悬浮提示以测试
+  es: Activa la superposición para probarla
+  ja: オーバーレイを有効にしてテスト
+  ko: 오버레이를 켜서 테스트
+overlay.duration_label:
+  en: Duration
+  ru: "Длительность"
+  zh-CN: 时长
+  es: Duración
+  ja: 表示時間
+  ko: 지속 시간
+overlay.duration_suffix:
+  en: " ms"
+  ru: " мс"
+  zh-CN: " 毫秒"
+  es: " ms"
+  ja: " ms"
+  ko: " ms"
+overlay.position_label:
+  en: Position
+  ru: "Позиция"
+  zh-CN: 位置
+  es: Posición
+  ja: 位置
+  ko: 위치
+overlay.on_all_monitors_label:
+  en: Show on all monitors
+  ru: "Показывать на всех мониторах"
+  zh-CN: 在所有显示器上显示
+  es: Mostrar en todos los monitores
+  ja: すべてのモニターに表示
+  ko: 모든 모니터에 표시
+overlay.all_monitors_hint:
+  en: (one toast per monitor when enabled, otherwise on the primary monitor)
+  ru: "(по одному уведомлению на каждый монитор, иначе на основном)"
+  zh-CN: （启用时每显示器一个提示，否则在主显示器）
+  es: (un aviso por monitor si está activo, si no en el monitor principal)
+  ja: (有効時はモニターごとに1件、無効時はプライマリモニター)
+  ko: (켜면 모니터별 하나, 그렇지 않으면 주 모니터)
+
+# Toast chip texts (capture::saved_text + capture::Error Display messages).
+toast.saved:
+  en: "Saved: %{file_name}"
+  ru: "Сохранено: %{file_name}"
+  zh-CN: 已保存：%{file_name}
+  es: "Guardado: %{file_name}"
+  ja: "保存: %{file_name}"
+  ko: "저장됨: %{file_name}"
+toast.save_failed:
+  en: "failed to save %{path}: %{reason}"
+  ru: "не удалось сохранить %{path}: %{reason}"
+  zh-CN: 无法保存 %{path}：%{reason}
+  es: "no se pudo guardar %{path}: %{reason}"
+  ja: "保存に失敗 %{path}: %{reason}"
+  ko: "저장 실패 %{path}: %{reason}"
+toast.no_active_window:
+  en: no active window
+  ru: "нет активного окна"
+  zh-CN: 没有活动窗口
+  es: ninguna ventana activa
+  ja: アクティブなウィンドウなし
+  ko: 활성 창 없음
+toast.template_invalid:
+  en: "invalid filename template: %{reason}"
+  ru: "недопустимый шаблон имени файла: %{reason}"
+  zh-CN: 文件名模板无效：%{reason}
+  es: "plantilla de nombre de archivo inválida: %{reason}"
+  ja: "ファイル名テンプレートが無効: %{reason}"
+  ko: "파일 이름 템플릿이 잘못됨: %{reason}"
+toast.dir_create_failed:
+  en: "failed to create output directory %{path}: %{reason}"
+  ru: "не удалось создать каталог сохранения %{path}: %{reason}"
+  zh-CN: 无法创建输出目录 %{path}：%{reason}
+  es: "no se pudo crear la carpeta de salida %{path}: %{reason}"
+  ja: "出力ディレクトリの作成に失敗 %{path}: %{reason}"
+  ko: "출력 디렉터리 생성 실패 %{path}: %{reason}"
+toast.too_many_collisions:
+  en: too many filename collisions in %{path} after %{limit} attempts
+  ru: "слишком много совпадений имён в %{path} после %{limit} попыток"
+  zh-CN: "%{path} 中文件名冲突过多，已达 %{limit} 次尝试"
+  es: demasiadas colisiones de nombres en %{path} tras %{limit} intentos
+  ja: "%{path} で %{limit} 回試行後もファイル名衝突が多すぎ"
+  ko: "%{path}에서 파일 이름 충돌이 %{limit}회 시도 후 너무 많음"
+toast.monitor_capture_failed:
+  en: "failed to capture monitor image: %{reason}"
+  ru: "не удалось захватить изображение монитора: %{reason}"
+  zh-CN: 无法捕获显示器图像：%{reason}
+  es: "no se pudo capturar la imagen del monitor: %{reason}"
+  ja: "モニター画像のキャプチャに失敗: %{reason}"
+  ko: "모니터 이미지 캡처 실패: %{reason}"
+toast.window_title_failed:
+  en: "failed to read window title: %{reason}"
+  ru: "не удалось прочитать название окна: %{reason}"
+  zh-CN: 无法读取窗口标题：%{reason}
+  es: "no se pudo leer el título de la ventana: %{reason}"
+  ja: "ウィンドウタイトルの読み取りに失敗: %{reason}"
+  ko: "창 제목 읽기 실패: %{reason}"
+toast.window_capture_failed:
+  en: "failed to capture window image: %{reason}"
+  ru: "не удалось захватить изображение окна: %{reason}"
+  zh-CN: 无法捕获窗口图像：%{reason}
+  es: "no se pudo capturar la imagen de la ventana: %{reason}"
+  ja: "ウィンドウ画像のキャプチャに失敗: %{reason}"
+  ko: "창 이미지 캡처 실패: %{reason}"
+toast.window_list_failed:
+  en: "failed to list windows: %{reason}"
+  ru: "не удалось получить список окон: %{reason}"
+  zh-CN: 无法列出窗口：%{reason}
+  es: "no se pudo enumerar las ventanas: %{reason}"
+  ja: "ウィンドウ一覧の取得に失敗: %{reason}"
+  ko: "창 목록 가져오기 실패: %{reason}"
+toast.monitor_list_failed:
+  en: "failed to list monitors: %{reason}"
+  ru: "не удалось получить список мониторов: %{reason}"
+  zh-CN: 无法列出显示器：%{reason}
+  es: "no se pudo enumerar los monitores: %{reason}"
+  ja: "モニター一覧の取得に失敗: %{reason}"
+  ko: "모니터 목록 가져오기 실패: %{reason}"
+toast.no_monitors_found:
+  en: no monitors found
+  ru: "мониторы не найдены"
+  zh-CN: 未找到显示器
+  es: no se encontraron monitores
+  ja: モニターが見つかりません
+  ko: 모니터를 찾을 수 없음
+
+# Filename template validation errors (template::Error Display messages).
+paths.template_absolute:
+  en: "template must be a relative path inside the save folder, got absolute path: %{template}"
+  ru: "шаблон должен быть относительным путём внутри папки сохранения, получен абсолютный путь: %{template}"
+  zh-CN: 模板必须是保存文件夹内的相对路径，收到绝对路径：%{template}
+  es: "la plantilla debe ser una ruta relativa dentro de la carpeta de guardado, se recibió una ruta absoluta: %{template}"
+  ja: "テンプレートは保存フォルダ内の相対パスでなければなりません、絶対パスを受け取りました: %{template}"
+  ko: "템플릿은 저장 폴더 내부의 상대 경로여야 하는데 절대 경로를 받았습니다: %{template}"
+paths.template_parent_segment:
+  en: "template must not contain \"..\" segments, got: %{template}"
+  ru: "шаблон не должен содержать сегменты \"..\", получен: %{template}"
+  zh-CN: "模板不得包含 \"..\" 段，收到：%{template}"
+  es: "la plantilla no debe contener segmentos \"..\", recibido: %{template}"
+  ja: "テンプレートに \"..\" セグメントを含められません、受け取り: %{template}"
+  ko: "템플릿에 \"..\" 세그먼트를 포함할 수 없습니다, 받은 값: %{template}"
+paths.template_unknown_token:
+  en: "unknown token \"%{token}\" in template: %{template}"
+  ru: "неизвестная подстановка \"%{token}\" в шаблоне: %{template}"
+  zh-CN: "模板中的未知占位符 \"%{token}\"：模板 %{template}"
+  es: "token desconocido \"%{token}\" en la plantilla: %{template}"
+  ja: "テンプレート内の不明なトークン \"%{token}\": %{template}"
+  ko: "템플릿의 알 수 없는 토큰 \"%{token}\": %{template}"
+
+# Tray menu labels and tooltip (tray.rs).
+tray.take_screenshot:
+  en: Take screenshot
+  ru: "Сделать снимок"
+  zh-CN: 截屏
+  es: Capturar pantalla
+  ja: スクリーンショットを撮る
+  ko: 스크린샷 촬영
+tray.settings:
+  en: Settings
+  ru: "Настройки"
+  zh-CN: 设置
+  es: Ajustes
+  ja: 設定
+  ko: 설정
+tray.exit:
+  en: Exit
+  ru: "Выход"
+  zh-CN: 退出
+  es: Salir
+  ja: 終了
+  ko: 종료
+tray.tooltip:
+  en: virshot
+  ru: "virshot"
+  zh-CN: "virshot"
+  es: "virshot"
+  ja: "virshot"
+  ko: "virshot"

@@ -3,6 +3,40 @@ use super::*;
 use crate::config::Controls;
 use global_hotkey::hotkey::Code;
 use global_hotkey::hotkey::Modifiers;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+
+/// Serializes every test that reads or writes the process-wide locale —
+/// `rust_i18n::locale()` is a process-wide global with a per-thread cache, so
+/// locale-touching tests must not run in parallel (same pattern as
+/// `i18n.tests.rs` / `capture.tests.rs`).
+static LOCALE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take the locale lock; a poisoned lock (a panic in another locale test) is
+/// recovered rather than unwrapped, like every other mailbox in this crate.
+fn locale_guard() -> MutexGuard<'static, ()> {
+    LOCALE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Assert a rendered UI string goes through the catalog `key` AND the
+/// catalog's `en` value equals the shipped English contract byte-for-byte.
+/// Callers must hold `locale_guard()` and pin `"en"` first — this helper
+/// calls `t!` itself. Tests that never leave `en` need no further restore:
+/// the entry `set_locale("en")` pins this thread's cache for the whole test.
+fn assert_en_catalog(key: &str, rendered: &str, contract: &str) {
+    assert_eq!(
+        rendered,
+        rust_i18n::t!(key).as_ref(),
+        "the rendered text must come from catalog key `{key}`"
+    );
+    assert_eq!(
+        rust_i18n::t!(key).as_ref(),
+        contract,
+        "catalog `en` value for `{key}` must equal the shipped English wording"
+    );
+}
 
 /// Path as a `/`-separated string, so a fixture compares identically on
 /// linux and windows-gnu (`join` inserts the host separator).
@@ -426,21 +460,32 @@ fn binding_from_press_after_clear_replaces_key_and_mods_and_keeps_pad() {
 
 #[test]
 fn bind_button_label_while_capturing_shows_the_press_prompt() {
-    assert_eq!(
-        bind_button_label(true, "PrintScreen", &[]),
-        CAPTURE_BUTTON_LABEL
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // The capture prompt is catalog-driven (`hotkey.capture_button_label`);
+    // matching its en value proves the branch AND the wording.
+    assert_en_catalog(
+        "hotkey.capture_button_label",
+        &bind_button_label(true, "PrintScreen", &[]),
+        "Press keys…",
     );
 }
 
 #[test]
 fn bind_button_label_of_a_cleared_binding_shows_the_click_prompt() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let mut binding = Binding::default();
     clear_key_binding(&mut binding);
 
-    assert_eq!(
-        bind_button_label(false, &binding.key, &binding.mods),
-        KEY_UNBOUND_LABEL,
-        "an unbound row must say it needs a press, not paint an empty button"
+    // An unbound row must say it needs a press, not paint an empty button:
+    // the prompt is the catalog `hotkey.unassigned` en value.
+    assert_en_catalog(
+        "hotkey.unassigned",
+        &bind_button_label(false, &binding.key, &binding.mods),
+        "unbound — click to bind",
     );
 }
 
@@ -498,6 +543,9 @@ fn registered_registration_maps_to_no_icon() {
 
 #[test]
 fn reserved_registration_maps_to_info_icon_with_scope_tooltip() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let reserved = Registration::Reserved {
         action: Action::Rect,
         combo: "ctrl+PrintScreen".to_owned(),
@@ -505,8 +553,13 @@ fn reserved_registration_maps_to_info_icon_with_scope_tooltip() {
 
     let icon = icon_for_status(&reserved).expect("info icon");
     assert_eq!(icon.kind, IconKind::Info);
-    assert!(icon.tooltip.contains("reserved"));
-    assert!(icon.tooltip.contains("out of MVP scope"));
+    // Exact en wording (was a `contains` proxy): the tooltip is the catalog
+    // `hotkey.reserved_tooltip` render, byte-for-byte.
+    assert_en_catalog(
+        "hotkey.reserved_tooltip",
+        &icon.tooltip,
+        "reserved — out of MVP scope",
+    );
 }
 
 #[test]
@@ -607,6 +660,9 @@ fn binding(key: &str, mods: &[&str], pad: Option<&str>) -> Binding {
 
 #[test]
 fn duplicate_bindings_detects_same_key_with_same_mods() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let mut draft = Settings::default();
     // Window loses its Alt modifier: both rows are bare `PrintScreen`.
     draft.controls.window = binding("PrintScreen", &[], None);
@@ -615,15 +671,30 @@ fn duplicate_bindings_detects_same_key_with_same_mods() {
     assert_eq!(duplicates[0].action, Action::FullScreen);
     assert_eq!(duplicates[0].other, Action::Window);
     assert_eq!(duplicates[0].kind, DuplicateKind::Keyboard);
-    assert!(duplicates[0].description.contains("Window"));
-    assert!(duplicates[0].description.contains("PrintScreen"));
-    assert!(
-        duplicates[0].description.is_ascii(),
-        "tooltip text must be English"
+    // The description IS the catalog render of `hotkey.duplicate_error` with
+    // the other row's label and this row's combo; the en contract constant
+    // pins the shipped English wording (the old `is_ascii` proxy is gone —
+    // Cyrillic lands in Stage 3, so locale-guarded en equality is the check).
+    assert_eq!(
+        duplicates[0].description,
+        rust_i18n::t!(
+            "hotkey.duplicate_error",
+            row = row_label(Action::Window),
+            combo = "PrintScreen"
+        )
+        .into_owned(),
+        "the tooltip must render through catalog hotkey.duplicate_error"
+    );
+    assert_eq!(
+        duplicates[0].description, "Duplicates Window: PrintScreen",
+        "catalog `en` value must match the shipped English contract"
     );
     assert_eq!(duplicates[1].action, Action::Window);
     assert_eq!(duplicates[1].other, Action::FullScreen);
-    assert!(duplicates[1].description.contains("Full screen"));
+    assert_eq!(
+        duplicates[1].description, "Duplicates Full screen: PrintScreen",
+        "the mirrored row must name the other action"
+    );
 }
 
 #[test]
@@ -679,6 +750,9 @@ fn duplicate_bindings_ignores_reserved_rect_action() {
 
 #[test]
 fn duplicate_bindings_detects_pad_duplicate_case_insensitively() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let mut draft = Settings::default();
     // Keyboard stays unique (§7 defaults); only the pad strings collide.
     draft.controls.full_screen.pad = Some("Guide".to_owned());
@@ -686,8 +760,26 @@ fn duplicate_bindings_detects_pad_duplicate_case_insensitively() {
     let duplicates = duplicate_bindings(&draft);
     assert_eq!(duplicates.len(), 2, "one pad collision reports both rows");
     assert!(duplicates.iter().all(|d| d.kind == DuplicateKind::Pad));
-    assert!(duplicates[0].description.contains("Window pad"));
-    assert!(duplicates[1].description.contains("guide"));
+    // Catalog-driven description (`hotkey.duplicate_pad_error`): the other
+    // row's label plus this row's stored pad notation, en contract pinned.
+    assert_eq!(
+        duplicates[0].description,
+        rust_i18n::t!(
+            "hotkey.duplicate_pad_error",
+            row = row_label(Action::Window),
+            pad = "Guide"
+        )
+        .into_owned(),
+        "the tooltip must render through catalog hotkey.duplicate_pad_error"
+    );
+    assert_eq!(
+        duplicates[0].description, "Duplicates Window pad: Guide",
+        "catalog `en` value must match the shipped English contract"
+    );
+    assert_eq!(
+        duplicates[1].description, "Duplicates Full screen pad: guide",
+        "the mirrored row keeps the notation case it stored"
+    );
     // An empty pad string means "no pad trigger", never a collision.
     draft.controls.full_screen.pad = Some(String::new());
     draft.controls.window.pad = Some(String::new());
@@ -766,13 +858,30 @@ fn keyboard_warning_names_registration_failure_for_that_action_only() {
 
 #[test]
 fn keyboard_warning_names_keyboard_duplicate() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let mut draft = Settings::default();
     // Both active rows are bare `PrintScreen` now — the keyboard collision.
     draft.controls.window = binding("PrintScreen", &[], None);
+    // The tooltip names the other row and this row's combo — rendered
+    // through catalog `hotkey.duplicate_error`, en contract pinned.
+    assert_eq!(
+        keyboard_warning(&draft, Action::FullScreen, None),
+        Some(
+            rust_i18n::t!(
+                "hotkey.duplicate_error",
+                row = row_label(Action::Window),
+                combo = "PrintScreen"
+            )
+            .into_owned()
+        ),
+        "the tooltip must render through catalog hotkey.duplicate_error"
+    );
     assert_eq!(
         keyboard_warning(&draft, Action::FullScreen, None),
         Some("Duplicates Window: PrintScreen".to_owned()),
-        "the tooltip must name the other row and this row's combo"
+        "catalog `en` value must match the shipped English contract"
     );
     assert_eq!(
         keyboard_warning(&draft, Action::Window, None),
@@ -788,14 +897,30 @@ fn keyboard_warning_names_keyboard_duplicate() {
 
 #[test]
 fn keyboard_warning_prefers_a_duplicate_over_a_registration_failure() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let mut draft = Settings::default();
     draft.controls.window = binding("PrintScreen", &[], None);
     // A collision blocks Apply — that is the actionable state, so it wins over
-    // the stale registration status of the last applied settings.
+    // the stale registration status of the last applied settings. The winning
+    // tooltip is the catalog `hotkey.duplicate_error` render under `en`.
+    assert_eq!(
+        keyboard_warning(&draft, Action::FullScreen, Some("already registered")),
+        Some(
+            rust_i18n::t!(
+                "hotkey.duplicate_error",
+                row = row_label(Action::Window),
+                combo = "PrintScreen"
+            )
+            .into_owned()
+        ),
+        "a draft collision outranks a registration failure"
+    );
     assert_eq!(
         keyboard_warning(&draft, Action::FullScreen, Some("already registered")),
         Some("Duplicates Window: PrintScreen".to_owned()),
-        "a draft collision outranks a registration failure"
+        "catalog `en` value must match the shipped English contract"
     );
 }
 
@@ -821,14 +946,31 @@ fn keyboard_warning_ignores_pad_duplicate() {
 /// must be composed ONLY from pad signals.
 #[test]
 fn pad_warning_names_pad_duplicate_only_for_pad_rows() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let mut draft = Settings::default();
     // Keyboard stays unique (§7 defaults); only the pad notation collides.
     draft.controls.full_screen.pad = Some("XboxX".to_owned());
     draft.controls.window.pad = Some("xboxx".to_owned());
+    // Catalog-driven tooltip (`hotkey.duplicate_pad_error`): the other row's
+    // label plus this row's stored pad notation, en contract pinned.
+    assert_eq!(
+        pad_warning(&draft, Action::FullScreen),
+        Some(
+            rust_i18n::t!(
+                "hotkey.duplicate_pad_error",
+                row = row_label(Action::Window),
+                pad = "XboxX"
+            )
+            .into_owned()
+        ),
+        "the tooltip must render through catalog hotkey.duplicate_pad_error"
+    );
     assert_eq!(
         pad_warning(&draft, Action::FullScreen),
         Some("Duplicates Window pad: XboxX".to_owned()),
-        "the tooltip must name the other row and this row's pad"
+        "catalog `en` value must match the shipped English contract"
     );
     assert_eq!(
         pad_warning(&draft, Action::Window),
@@ -869,11 +1011,16 @@ fn pad_warning_ignores_keyboard_duplicate() {
 
 #[test]
 fn duplicate_save_tooltip_explains_why_saving_is_blocked() {
-    // Disabled Apply/OK must tell the user what to do (UI text is English,
-    // spec §2). Exact wording, like the other label tests.
-    assert_eq!(
-        DUPLICATE_SAVE_TOOLTIP,
-        "Duplicate binding: one combo or pad button must trigger only one action — re-bind one of the rows"
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // Disabled Apply/OK must tell the user what to do: exact wording via
+    // catalog `hotkey.duplicate_tooltip`, pinned byte-for-byte as the en
+    // contract (spec §2, §4.4).
+    assert_en_catalog(
+        "hotkey.duplicate_tooltip",
+        &duplicate_save_tooltip(),
+        "Duplicate binding: one combo or pad button must trigger only one action — re-bind one of the rows",
     );
 }
 
@@ -921,16 +1068,30 @@ fn close_decision_tray_exit_closes_for_real() {
 
 #[test]
 fn tab_labels_are_english() {
-    assert_eq!(Tab::General.label(), "General");
-    assert_eq!(Tab::Hotkeys.label(), "Hotkeys");
-    assert_eq!(Tab::Overlay.label(), "Overlay");
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // Each tab header renders through its catalog key; the en value pins the
+    // shipped English wording byte-for-byte.
+    assert_en_catalog("general.tab_general", &Tab::General.label(), "General");
+    assert_en_catalog("general.tab_hotkeys", &Tab::Hotkeys.label(), "Hotkeys");
+    assert_en_catalog("general.tab_overlay", &Tab::Overlay.label(), "Overlay");
 }
 
 #[test]
 fn row_labels_are_english_per_spec() {
-    assert_eq!(row_label(Action::FullScreen), "Full screen");
-    assert_eq!(row_label(Action::Window), "Window");
-    assert_eq!(row_label(Action::Rect), "Rect area");
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // Row labels render through catalog `hotkey.row_*`; the en values pin the
+    // shipped English wording byte-for-byte.
+    assert_en_catalog(
+        "hotkey.row_full_screen",
+        &row_label(Action::FullScreen),
+        "Full screen",
+    );
+    assert_en_catalog("hotkey.row_window", &row_label(Action::Window), "Window");
+    assert_en_catalog("hotkey.row_rect", &row_label(Action::Rect), "Rect area");
 }
 
 #[test]
@@ -1013,27 +1174,33 @@ fn capture_transition_clear_ends_capture_and_restores_only_while_capturing() {
 
 #[test]
 fn bind_hint_mentions_escape_and_backspace() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     // One English line at the start of the bind form, painted on every pass
-    // (§4.4 v8: it is not gated by capture state); exact wording, and English
-    // per spec §2 (ASCII pins it without Cyrillic creeping in).
-    assert_eq!(BIND_HINT, "Esc to cancel, Backspace to clear");
-    assert!(
-        BIND_HINT.is_ascii(),
-        "UI text is English (spec §2 i18n note)"
+    // (§4.4 v8: it is not gated by capture state). Exact wording comes from
+    // catalog `hotkey.bind_hint`; the old `is_ascii` proxy (spec §2 i18n
+    // note) is replaced by locale-guarded en equality, because Stage 3
+    // brings Cyrillic into the catalog — ASCII no longer means "English".
+    assert_en_catalog(
+        "hotkey.bind_hint",
+        &bind_hint(),
+        "Esc to cancel, Backspace to clear",
     );
 }
 
 #[test]
 fn unbound_save_tooltip_explains_why_saving_is_blocked() {
-    // Disabled Apply/OK must tell the user what to do (UI text is English,
-    // spec §2). Exact wording, like the other label tests.
-    assert_eq!(
-        UNBOUND_SAVE_TOOLTIP,
-        "Bind a key on every row before saving — Backspace clears a binding"
-    );
-    assert!(
-        UNBOUND_SAVE_TOOLTIP.contains("Backspace"),
-        "the tooltip must explain how the row got unbound"
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // Disabled Apply/OK must tell the user what to do (spec §2). Exact
+    // wording via catalog `hotkey.bind_all_hint`; the en contract constant
+    // keeps the Backspace affordance in the pinned text.
+    assert_en_catalog(
+        "hotkey.bind_all_hint",
+        &unbound_save_tooltip(),
+        "Bind a key on every row before saving — Backspace clears a binding",
     );
 }
 
@@ -1085,29 +1252,52 @@ fn pad_capture_target_without_capturing_row_drops_the_press() {
 
 #[test]
 fn pad_field_label_without_gameinput_backend_is_disabled_placeholder() {
-    assert_eq!(
-        pad_field_label(false, false, Some("South")),
-        GAMEPAD_PLACEHOLDER_LABEL
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // Both capture states fall through to catalog `gamepad.windows_only_note`;
+    // matching its en value proves the branch AND the wording.
+    assert_en_catalog(
+        "gamepad.windows_only_note",
+        &pad_field_label(false, false, Some("South")),
+        "(gamepad — Windows only)",
     );
-    assert_eq!(
-        pad_field_label(false, true, Some("South")),
-        GAMEPAD_PLACEHOLDER_LABEL
+    assert_en_catalog(
+        "gamepad.windows_only_note",
+        &pad_field_label(false, true, Some("South")),
+        "(gamepad — Windows only)",
     );
 }
 
 #[test]
 fn pad_field_label_capturing_shows_press_prompt() {
-    assert_eq!(
-        pad_field_label(true, true, Some("South")),
-        PAD_CAPTURE_BUTTON_LABEL
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // The pad capture prompt is catalog-driven
+    // (`gamepad.capture_button_label`); matching its en value proves the
+    // branch AND the wording.
+    assert_en_catalog(
+        "gamepad.capture_button_label",
+        &pad_field_label(true, true, Some("South")),
+        "Press a button…",
     );
 }
 
 #[test]
 fn pad_field_label_shows_notation_or_click_to_bind_prompt() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // Stored notation is config data (§4.1), never localized text.
     assert_eq!(pad_field_label(true, false, Some("unknown:3")), "unknown:3");
     assert_eq!(pad_field_label(true, false, Some("Guide")), "Guide");
-    assert_eq!(pad_field_label(true, false, None), PAD_UNBOUND_LABEL);
+    // The unbound slot is catalog-driven (`hotkey.pad_label`).
+    assert_en_catalog(
+        "hotkey.pad_label",
+        &pad_field_label(true, false, None),
+        "pad — click to bind",
+    );
 }
 
 #[test]
@@ -1279,16 +1469,17 @@ fn clear_pad_binding_ends_the_pad_duplicate_warning() {
 
 #[test]
 fn pad_capture_tooltip_mentions_escape_and_backspace() {
-    // The pad field must state the same affordances as the shared hint line
-    // (§4.4, v2). Exact English wording, like the other label tests.
-    assert_eq!(
-        PAD_CAPTURE_TOOLTIP,
-        "Press a gamepad button to bind it — Esc to cancel, Backspace to clear; click again to cancel."
-    );
-    assert!(
-        PAD_CAPTURE_TOOLTIP.contains("Esc to cancel")
-            && PAD_CAPTURE_TOOLTIP.contains("Backspace to clear"),
-        "pad capture tooltip must name Esc and Backspace: {PAD_CAPTURE_TOOLTIP}"
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    // The pad field states the same affordances as the shared hint line
+    // (§4.4, v2), sourced through catalog `gamepad.capture_tooltip`: the
+    // exact en wording names Esc and Backspace, so the earlier `contains`
+    // checks are subsumed by the byte-for-byte contract.
+    assert_en_catalog(
+        "gamepad.capture_tooltip",
+        &pad_capture_tooltip(),
+        "Press a gamepad button to bind it — Esc to cancel, Backspace to clear; click again to cancel.",
     );
 }
 
@@ -1351,8 +1542,13 @@ fn app_window_icon_embedded_asset_has_transparent_corners() {
 
 #[test]
 fn placeholder_reference_lines_are_derived_from_the_token_table() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     // The rows ARE `template::TOKENS` — one per entry, token spelled with the
-    // `%`, description copied verbatim. A UI-side copy would drift.
+    // `%`, description copied verbatim. Descriptions are catalog lookups
+    // (`general.placeholder_desc_*`), so under a pinned `en` this equality
+    // pins catalog == TOKENS byte-for-byte; a UI-side copy would drift.
     let lines = placeholder_reference_lines();
     assert_eq!(lines.len(), crate::template::TOKENS.len());
     for (line, (name, description)) in lines.iter().zip(crate::template::TOKENS) {
@@ -1366,6 +1562,9 @@ fn placeholder_reference_lines_are_derived_from_the_token_table() {
 
 #[test]
 fn placeholder_reference_lists_window_title_and_extension() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let lines = placeholder_reference_lines();
     let title_row = lines
         .iter()
@@ -1402,9 +1601,18 @@ fn overlay_test_button_enabled_only_when_overlay_toast_enabled() {
 /// button cannot drift from the `Saved: <file name>` format.
 #[test]
 fn overlay_test_message_matches_real_save_success_wording() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     assert_eq!(
         overlay_test_message(OVERLAY_TEST_FILENAME),
-        "Saved: test.png"
+        rust_i18n::t!("toast.saved", file_name = OVERLAY_TEST_FILENAME).into_owned(),
+        "the chip text must render through catalog toast.saved"
+    );
+    assert_eq!(
+        overlay_test_message(OVERLAY_TEST_FILENAME),
+        "Saved: test.png",
+        "catalog `en` value must match the shipped English contract"
     );
     assert_eq!(
         overlay_test_message(OVERLAY_TEST_FILENAME),
@@ -1419,6 +1627,9 @@ fn overlay_test_message_matches_real_save_success_wording() {
 /// and the log never carries a real `Saved: <path>` capture line.
 #[test]
 fn overlay_test_does_not_write_a_file() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     let chip = test_overlay_toast(&Overlay::default());
     assert!(chip.image.is_none(), "test chip must carry no image bytes");
     assert_eq!(
@@ -1468,12 +1679,17 @@ fn overlay_test_toast_mirrors_draft_position_duration_and_monitors() {
 }
 
 /// Disabled-button tooltip wording (pinned, spec §4.4 English UI): the hint
-/// names the checkbox the user must tick before the test chip is possible.
+/// names the checkbox the user must tick before the test chip is possible,
+/// sourced through catalog `overlay.test_disabled_hint` under a pinned `en`.
 #[test]
 fn overlay_test_disabled_hint_names_the_overlay_checkbox() {
-    assert_eq!(
-        OVERLAY_TEST_DISABLED_HINT,
-        "Enable the overlay toast to test it"
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    assert_en_catalog(
+        "overlay.test_disabled_hint",
+        &overlay_test_disabled_hint(),
+        "Enable the overlay toast to test it",
     );
 }
 
@@ -1610,25 +1826,244 @@ fn retry_status_update_replaces_the_failed_row_and_keeps_the_rest() {
 
 #[test]
 fn registration_failure_reason_for_reserved_key_is_unchanged() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
     // The reserved rect row has its own fixed wording (§4.1): a failed combo is
-    // never reserved, so the readable-reason change must not touch it.
+    // never reserved, so the readable-reason change must not touch it. The
+    // reserved tooltip renders through catalog `hotkey.reserved_tooltip`.
     let reserved = Registration::Reserved {
         action: Action::Rect,
         combo: "Ctrl+PrintScreen".to_owned(),
     };
-    assert_eq!(
-        icon_for_status(&reserved).expect("info icon").tooltip,
-        RESERVED_TOOLTIP
+    let reserved_icon = icon_for_status(&reserved).expect("info icon");
+    assert_eq!(reserved_icon.tooltip, reserved_tooltip());
+    assert_en_catalog(
+        "hotkey.reserved_tooltip",
+        &reserved_icon.tooltip,
+        "reserved — out of MVP scope",
     );
 
     let draft = Settings::default();
     assert_eq!(keyboard_warning(&draft, Action::Rect, None), None);
 
     // A FAILED row passes its readable reason through verbatim (the draft
-    // collision still outranks it — shipped Stage 10 rule).
+    // collision still outranks it — shipped Stage 10 rule). The reason is a
+    // passthrough string, not catalog text, so it needs no locale key.
     let readable = "already registered by another application (PrintScreen is held elsewhere) — free that key or pick another";
     assert_eq!(
         keyboard_warning(&draft, Action::FullScreen, Some(readable)),
         Some(readable.to_owned())
     );
+}
+
+// ---------- language dropdown (General tab, Stage 2b, spec §2) ----------
+
+#[test]
+fn language_options_are_the_six_supported_locales_with_native_names() {
+    // The dropdown order IS this table: config code + NATIVE endonym.
+    // Endonyms are never localized ("Русский" stays Russian in every
+    // locale), so they are constants, not catalog keys. `en` is first
+    // because it is the spec §7 default.
+    assert_eq!(
+        LANGUAGE_OPTIONS,
+        [
+            ("en", "English"),
+            ("ru", "Русский"),
+            ("zh-CN", "简体中文"),
+            ("es", "Español"),
+            ("ja", "日本語"),
+            ("ko", "한국어"),
+        ]
+    );
+    assert_eq!(LANGUAGE_OPTIONS[0].0, "en", "the default locale is first");
+    // Every dropdown code must survive `config::language_code` verbatim —
+    // the table and the normalization rule (src/config.rs) must agree.
+    for (code, _) in LANGUAGE_OPTIONS {
+        assert_eq!(
+            crate::config::language_code(code),
+            code,
+            "dropdown code {code} must survive config normalization"
+        );
+    }
+}
+
+#[test]
+fn language_dropdown_default_shows_english() {
+    // A default draft selects the first option's native name: the selected
+    // text of the ComboBox resolves through the option table.
+    assert_eq!(
+        native_name(&Settings::default().general.language),
+        "English"
+    );
+    assert_eq!(
+        LANGUAGE_OPTIONS[0].1,
+        native_name(&Settings::default().general.language),
+        "the selected text of a default draft is the first dropdown entry"
+    );
+}
+
+#[test]
+fn locale_code_of_draft_matches_config_normalization() {
+    // `locale_code_of` is the Apply-time wrapper over `config::language_code`:
+    // the same lenient EXACT-match rule as on load (spec §7), so the dropdown
+    // value and a hand-edited config switch identically.
+    let mut draft = Settings::default();
+    draft.general.language = "ru".to_owned();
+    assert_eq!(locale_code_of(&draft), "ru");
+    draft.general.language = "de".to_owned();
+    assert_eq!(
+        locale_code_of(&draft),
+        "en",
+        "an unknown code normalizes to en"
+    );
+    draft.general.language = String::new();
+    assert_eq!(
+        locale_code_of(&draft),
+        "en",
+        "an empty code normalizes to en"
+    );
+}
+
+/// Stage 3 (spec §2/§7): under the `ru` locale the tab headers render the
+/// Russian catalog values. `ru` is restored BEFORE the assertions so a
+/// failure never leaves it installed for other tests.
+#[test]
+fn tab_labels_follow_russian_locale() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("ru");
+
+    let labels = [
+        Tab::General.label(),
+        Tab::Hotkeys.label(),
+        Tab::Overlay.label(),
+    ];
+
+    rust_i18n::set_locale("en");
+
+    assert_eq!(
+        labels,
+        [
+            "Общие".to_owned(),
+            "Горячие клавиши".to_owned(),
+            "Оверлей".to_owned(),
+        ],
+        "tab headers must render Russian under the ru locale"
+    );
+}
+
+/// The placeholder reference keeps token notation (`%Y`, `%t`, `%ext`) in
+/// every locale — the token column is config notation, while the
+/// description column follows the UI language. `ru` is restored BEFORE the
+/// assertions.
+#[test]
+fn placeholder_reference_lines_follow_russian_locale() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("ru");
+
+    let lines = placeholder_reference_lines();
+
+    rust_i18n::set_locale("en");
+
+    assert_eq!(
+        lines.len(),
+        crate::template::TOKENS.len(),
+        "one reference row per token in every locale"
+    );
+    for (line, (name, _)) in lines.iter().zip(crate::template::TOKENS) {
+        assert_eq!(
+            line.0,
+            format!("%{name}"),
+            "the token column must stay notation under ru"
+        );
+        assert!(
+            !line.1.is_ascii(),
+            "the description column must render Russian under ru, got \"{}\"",
+            line.1
+        );
+    }
+
+    // Notation inside a description survives verbatim: the format name in
+    // `%ext` and the full-screen literal in `%t` are data, not prose.
+    let ext = lines
+        .iter()
+        .find(|(token, _)| token == "%ext")
+        .expect("extension token must be listed");
+    assert!(
+        ext.1.contains("png"),
+        "%ext must keep the png notation under ru, got \"{}\"",
+        ext.1
+    );
+    let title = lines
+        .iter()
+        .find(|(token, _)| token == "%t")
+        .expect("title token must be listed");
+    assert!(
+        title.1.contains("fullscreen"),
+        "%t must keep the fullscreen literal under ru, got \"{}\"",
+        title.1
+    );
+}
+
+/// Stage 4: under each new locale the description column follows the UI
+/// language — it must differ from the pinned `en` value (a ja description
+/// can contain ASCII digits, so the comparison is against the en value, not
+/// `is_ascii`) — while the token column stays notation (`%Y`, `%t`, `%ext`).
+/// zh-CN and ko descriptions must be non-ASCII. `en` descriptions are
+/// captured first; every locale is restored to `en` BEFORE its assertions.
+#[test]
+fn placeholder_reference_lines_render_in_each_locale() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+    let en_lines = placeholder_reference_lines();
+
+    for locale in ["zh-CN", "es", "ja", "ko"] {
+        rust_i18n::set_locale(locale);
+        let lines = placeholder_reference_lines();
+        rust_i18n::set_locale("en");
+
+        assert_eq!(
+            lines.len(),
+            crate::template::TOKENS.len(),
+            "one reference row per token under {locale}"
+        );
+        for (index, (line, (name, _))) in lines.iter().zip(crate::template::TOKENS).enumerate() {
+            assert_eq!(
+                line.0,
+                format!("%{name}"),
+                "the token column must stay notation under {locale}"
+            );
+            assert_ne!(
+                line.1, en_lines[index].1,
+                "the description column must follow the UI language under {locale}, got \"{}\"",
+                line.1
+            );
+        }
+        if locale == "zh-CN" || locale == "ko" {
+            assert!(
+                lines.iter().all(|(_, description)| !description.is_ascii()),
+                "every {locale} description must contain non-ASCII text, got {lines:?}"
+            );
+        }
+
+        // Notation inside a description survives verbatim in every locale.
+        let ext = lines
+            .iter()
+            .find(|(token, _)| token == "%ext")
+            .expect("extension token must be listed");
+        assert!(
+            ext.1.contains("png"),
+            "%ext must keep the png notation under {locale}, got \"{}\"",
+            ext.1
+        );
+        let title = lines
+            .iter()
+            .find(|(token, _)| token == "%t")
+            .expect("title token must be listed");
+        assert!(
+            title.1.contains("fullscreen"),
+            "%t must keep the fullscreen literal under {locale}, got \"{}\"",
+            title.1
+        );
+    }
 }

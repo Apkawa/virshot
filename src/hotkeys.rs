@@ -798,14 +798,16 @@ pub(crate) fn key_label(key: Code) -> String {
 /// Readable failure reason (spec §4.1 v2): names the combo and says what to do
 /// instead of the crate's `Debug` dump (`HotKey already registered: HotKey {
 /// mods: Modifiers(0x0), key: PrintScreen, id: 117 }`). The wording is UI text
-/// — it lands in the row tooltip and in the startup/restore ERROR log.
+/// — it lands in the row tooltip and in the startup/restore ERROR log, so it
+/// comes from the catalog (`hotkey.already_registered`, `hotkey.registration_failed`).
 fn failure_reason(failure: &RegistrationFailure, hotkey: &HotKey) -> String {
     match failure {
-        RegistrationFailure::AlreadyRegistered => format!(
-            "already registered by another application ({} is held elsewhere) — free that key or pick another",
-            combo_label(hotkey)
-        ),
-        RegistrationFailure::Other { message } => format!("registration failed: {message}"),
+        RegistrationFailure::AlreadyRegistered => {
+            rust_i18n::t!("hotkey.already_registered", combo = combo_label(hotkey)).into_owned()
+        }
+        RegistrationFailure::Other { message } => {
+            rust_i18n::t!("hotkey.registration_failed", reason = message).into_owned()
+        }
     }
 }
 

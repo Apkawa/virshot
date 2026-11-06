@@ -163,6 +163,7 @@ use crate::config::Format;
 use crate::config::Overlay;
 use crate::config::OverlayPosition;
 use crate::config::Settings;
+use crate::fonts;
 use crate::gamepad::CaptureField;
 use crate::gamepad::PadCaptureMailbox;
 use crate::gamepad::PadDownEvent;
@@ -204,28 +205,64 @@ fn browse_start_dir(save_path: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
+/// Catalog keys for the placeholder descriptions (`general.placeholder_desc_*`).
+/// Token names and key suffixes differ (`t`→`title`, `n`→`counter`,
+/// `y`→`year_short`), so the mapping is spelled out; the `%token` notation
+/// itself is config notation (spec §4.2) and stays untranslated.
+const PLACEHOLDER_DESC_KEYS: [(&str, &str); 11] = [
+    ("Y", "general.placeholder_desc_year"),
+    ("y", "general.placeholder_desc_year_short"),
+    ("mo", "general.placeholder_desc_month"),
+    ("d", "general.placeholder_desc_day"),
+    ("H", "general.placeholder_desc_hour"),
+    ("M", "general.placeholder_desc_minute"),
+    ("S", "general.placeholder_desc_second"),
+    ("iso", "general.placeholder_desc_iso"),
+    ("t", "general.placeholder_desc_title"),
+    ("n", "general.placeholder_desc_counter"),
+    ("ext", "general.placeholder_desc_ext"),
+];
+
+/// One token's localized description; an unlisted token falls back to the
+/// English `template::TOKENS` text rather than rendering a dotted key.
+fn placeholder_description(token: &str, english: &str) -> String {
+    match PLACEHOLDER_DESC_KEYS
+        .iter()
+        .find(|(name, _)| *name == token)
+    {
+        Some((_, key)) => rust_i18n::t!(*key).into_owned(),
+        None => english.to_owned(),
+    }
+}
+
 /// Placeholder reference rows for the General tab accordion (spec §4.2): one
 /// `(token, description)` line per `template::TOKENS` entry, token spelled with
 /// its `%`. The table is the single source of truth — it is the very list
 /// `template::render` validates against — so the UI states exactly the tokens a
-/// template may use and cannot drift from the renderer. Rows are rebuilt each
-/// UI frame: 11 short strings, well under the §5 budget.
-pub(crate) fn placeholder_reference_lines() -> Vec<(String, &'static str)> {
+/// template may use and cannot drift from the renderer. Descriptions are
+/// catalog lookups (spec §2); tokens stay config notation. Rows are rebuilt
+/// each UI frame: 11 short strings, well under the §5 budget.
+pub(crate) fn placeholder_reference_lines() -> Vec<(String, String)> {
     TOKENS
         .iter()
-        .map(|(name, description)| (format!("%{name}"), *description))
+        .map(|(name, description)| {
+            (
+                format!("%{name}"),
+                placeholder_description(name, description),
+            )
+        })
         .collect()
 }
 
 /// Hotkeys tab rows in spec §4.4 order.
 pub(crate) const HOTKEY_ROWS: [Action; 3] = [Action::FullScreen, Action::Window, Action::Rect];
 
-/// UI labels for the action rows (English).
-fn row_label(action: Action) -> &'static str {
+/// UI labels for the action rows (catalog `hotkey.row_*`, spec §2).
+fn row_label(action: Action) -> String {
     match action {
-        Action::FullScreen => "Full screen",
-        Action::Window => "Window",
-        Action::Rect => "Rect area",
+        Action::FullScreen => rust_i18n::t!("hotkey.row_full_screen").into_owned(),
+        Action::Window => rust_i18n::t!("hotkey.row_window").into_owned(),
+        Action::Rect => rust_i18n::t!("hotkey.row_rect").into_owned(),
     }
 }
 
@@ -248,17 +285,52 @@ fn position_label(position: OverlayPosition) -> &'static str {
     }
 }
 
+/// Language dropdown options (spec §2, Stage 2b): config code + NATIVE name.
+/// The array order IS the dropdown order, and `en` is first because it is the
+/// spec §7 default. Native names are endonyms — they are never localized
+/// ("Русский" stays Russian in every locale), so they are constants here,
+/// not catalog keys; only the row label is (`general.language_label`).
+pub(crate) const LANGUAGE_OPTIONS: [(&str, &str); 6] = [
+    ("en", "English"),
+    ("ru", "Русский"),
+    ("zh-CN", "简体中文"),
+    ("es", "Español"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+];
+
+/// Native display name of a config language code. An unknown or empty code
+/// mirrors `config::language_code`'s lenient normalization by showing the
+/// English endonym — the code normalizes to `en` when the draft is applied.
+fn native_name(code: &str) -> &str {
+    LANGUAGE_OPTIONS
+        .iter()
+        .find(|(option_code, _)| *option_code == code)
+        .map(|(_, native)| *native)
+        .unwrap_or(LANGUAGE_OPTIONS[0].1)
+}
+
+/// Locale code for `rust_i18n::set_locale` from a draft: a thin wrapper over
+/// `config::language_code`, the same EXACT-match normalization
+/// `config::load_or_default` applies on load (spec §7), so a dropdown value
+/// and a hand-edited config switch identically on Apply.
+pub(crate) fn locale_code_of(settings: &Settings) -> &'static str {
+    config::language_code(&settings.general.language)
+}
+
 /// Honest filename for the Overlay tab's test chip (Stage 7): no capture and
 /// no save happen, so the chip must not name a real file — the fixed name
 /// says what it is a test of, matching the spec §4.3 success wording
 /// (`Saved: <file name>`).
 pub(crate) const OVERLAY_TEST_FILENAME: &str = "test.png";
 
-/// Hover hint for the disabled test button (English UI, spec §4.4). The
-/// button is gated here in the GUI because a direct `ToastHandle::show` does
-/// not consult `overlay.enabled` — that gate lives in `capture::should_show`
-/// and only applies to capture-driven chips.
-pub(crate) const OVERLAY_TEST_DISABLED_HINT: &str = "Enable the overlay toast to test it";
+/// Hover hint for the disabled test button (catalog `overlay.test_disabled_hint`,
+/// spec §4.4). The button is gated here in the GUI because a direct
+/// `ToastHandle::show` does not consult `overlay.enabled` — that gate lives in
+/// `capture::should_show` and only applies to capture-driven chips.
+pub(crate) fn overlay_test_disabled_hint() -> String {
+    rust_i18n::t!("overlay.test_disabled_hint").into_owned()
+}
 
 /// Test-button gate (Stage 7): enabled exactly while the overlay toast
 /// checkbox is checked.
@@ -445,69 +517,102 @@ pub(crate) const SUPPORTED_KEY_NAMES: &[&str] = &[
 /// case-insensitively; `Win` maps to crate META).
 pub(crate) const MOD_NAMES: [&str; 4] = ["Alt", "Ctrl", "Shift", "Win"];
 
-/// Bind-button label while bind-by-press is waiting for a key (§4.4).
-const CAPTURE_BUTTON_LABEL: &str = "Press keys…";
+/// Bind-button label while bind-by-press is waiting for a key (§4.4,
+/// catalog `hotkey.capture_button_label`).
+fn capture_button_label() -> String {
+    rust_i18n::t!("hotkey.capture_button_label").into_owned()
+}
 
-/// Tooltip while capturing: Escape cancels. Live hotkeys are PAUSED during
-/// capture (Stage 18, spec §4.4 v5.5), so a press cannot fire a registered
-/// combo (the old PrintScreen quirk note is gone).
-const CAPTURE_TOOLTIP: &str = "Press a key combo to bind it — Esc to cancel.";
+/// Tooltip while capturing: Escape cancels (catalog `hotkey.capture_tooltip`).
+/// Live hotkeys are PAUSED during capture (Stage 18, spec §4.4 v5.5), so a
+/// press cannot fire a registered combo (the old PrintScreen quirk note is
+/// gone).
+fn capture_tooltip() -> String {
+    rust_i18n::t!("hotkey.capture_tooltip").into_owned()
+}
 
-/// Tooltip for the reserved-slot info icon (§4.4: rect is out of MVP scope).
-const RESERVED_TOOLTIP: &str = "reserved — out of MVP scope";
+/// Tooltip for the reserved-slot info icon (§4.4: rect is out of MVP scope,
+/// catalog `hotkey.reserved_tooltip`).
+fn reserved_tooltip() -> String {
+    rust_i18n::t!("hotkey.reserved_tooltip").into_owned()
+}
 
-/// Pad-field label while it is capturing a pad press (§4.4, Stage 5). The pump
-/// commits the first DOWN event, which also ends the capture; cancelling is a
-/// click of the same field again, starting a keyboard capture, or Escape (§4.4,
-/// v2), which ends it without changing the row.
-const PAD_CAPTURE_BUTTON_LABEL: &str = "Press a button…";
+/// Pad-field label while it is capturing a pad press (§4.4, Stage 5, catalog
+/// `gamepad.capture_button_label`). The pump commits the first DOWN event,
+/// which also ends the capture; cancelling is a click of the same field again,
+/// starting a keyboard capture, or Escape (§4.4, v2), which ends it without
+/// changing the row.
+fn pad_capture_button_label() -> String {
+    rust_i18n::t!("gamepad.capture_button_label").into_owned()
+}
 
 /// Tooltip while the pad field is capturing — the same affordances as the
-/// shared [`BIND_HINT`] line (§4.4, v2): Escape cancels, Backspace clears the
-/// pad slot; clicking the field again cancels too.
-const PAD_CAPTURE_TOOLTIP: &str =
-    "Press a gamepad button to bind it — Esc to cancel, Backspace to clear; click again to cancel.";
+/// shared [`bind_hint`] line (§4.4, v2): Escape cancels, Backspace clears the
+/// pad slot; clicking the field again cancels too (catalog
+/// `gamepad.capture_tooltip`).
+fn pad_capture_tooltip() -> String {
+    rust_i18n::t!("gamepad.capture_tooltip").into_owned()
+}
 
 /// Tooltip for a Windows pad button (spec §4.1: the pad trigger ORs with the
-/// keyboard combo through one shared debounce gate).
-const PAD_BIND_TOOLTIP: &str = "Gamepad trigger (fires together with the hotkey) — click to bind";
+/// keyboard combo through one shared debounce gate; catalog
+/// `gamepad.bind_tooltip`).
+fn pad_bind_tooltip() -> String {
+    rust_i18n::t!("gamepad.bind_tooltip").into_owned()
+}
 
-/// Empty pad field on Windows, ready to capture.
-const PAD_UNBOUND_LABEL: &str = "pad — click to bind";
+/// Empty pad field on Windows, ready to capture (catalog `hotkey.pad_label`).
+fn pad_unbound_label() -> String {
+    rust_i18n::t!("hotkey.pad_label").into_owned()
+}
 
-/// Pad field on a host with no GameInput backend. Linux gilrs is out of scope
-/// (AGENTS.md hardware finding), so the field stays a disabled
-/// placeholder there; the pad trigger still works from `config.toml` notation
-/// once a Windows pump delivers it.
-const GAMEPAD_PLACEHOLDER_LABEL: &str = "(gamepad — Windows only)";
+/// Pad field on a host with no GameInput backend (catalog
+/// `gamepad.windows_only_note`). Linux gilrs is out of scope (AGENTS.md
+/// hardware finding), so the field stays a disabled placeholder there; the pad
+/// trigger still works from `config.toml` notation once a Windows pump
+/// delivers it.
+fn gamepad_placeholder_label() -> String {
+    rust_i18n::t!("gamepad.windows_only_note").into_owned()
+}
 
 /// Bind-button minimum width so the three rows stay visually aligned.
 const BIND_BUTTON_MIN_WIDTH: f32 = 170.0;
 
-/// Always-visible one-line hint at the start of the bind form (§4.4, v8):
-/// Escape cancels a capture without changing the row and Backspace clears the
-/// binding — for keyboard capture the keyboard half (the pad slot stays), for
-/// pad capture the pad slot (the keyboard half stays). Shown whether or not a
-/// capture is active, so the keys are discoverable before anyone clicks a
-/// field. The wording is field-agnostic, so one line covers both fields.
-const BIND_HINT: &str = "Esc to cancel, Backspace to clear";
+/// Always-visible one-line hint at the start of the bind form (§4.4, v8,
+/// catalog `hotkey.bind_hint`): Escape cancels a capture without changing the
+/// row and Backspace clears the binding — for keyboard capture the keyboard
+/// half (the pad slot stays), for pad capture the pad slot (the keyboard half
+/// stays). Shown whether or not a capture is active, so the keys are
+/// discoverable before anyone clicks a field. The wording is field-agnostic,
+/// so one line covers both fields.
+fn bind_hint() -> String {
+    rust_i18n::t!("hotkey.bind_hint").into_owned()
+}
 
-/// Bind-button label of a row whose keyboard binding was cleared by Backspace.
-/// The empty `key` is the unbound marker — §4.1 notation has no empty key, so
-/// the button cannot show a binding and says the row needs a press instead.
-const KEY_UNBOUND_LABEL: &str = "unbound — click to bind";
+/// Bind-button label of a row whose keyboard binding was cleared by Backspace
+/// (catalog `hotkey.unassigned`). The empty `key` is the unbound marker —
+/// §4.1 notation has no empty key, so the button cannot show a binding and
+/// says the row needs a press instead.
+fn key_unbound_label() -> String {
+    rust_i18n::t!("hotkey.unassigned").into_owned()
+}
 
-/// Tooltip for a disabled Apply/OK while some row is unbound: saving a cleared
-/// binding writes a key `bindings::parse_key` rejects (§4.1), which costs the
-/// app its hotkey registrations and its pad triggers, so saving waits until
-/// the row is bound again.
-const UNBOUND_SAVE_TOOLTIP: &str =
-    "Bind a key on every row before saving — Backspace clears a binding";
+/// Tooltip for a disabled Apply/OK while some row is unbound (catalog
+/// `hotkey.bind_all_hint`): saving a cleared binding writes a key
+/// `bindings::parse_key` rejects (§4.1), which costs the app its hotkey
+/// registrations and its pad triggers, so saving waits until the row is bound
+/// again.
+fn unbound_save_tooltip() -> String {
+    rust_i18n::t!("hotkey.bind_all_hint").into_owned()
+}
 
 /// Tooltip for a disabled Apply/OK while two rows share a trigger (§4.4,
-/// Stage 3): one keyboard combo or pad button may trigger only one action,
-/// so saving waits until the draft is unique again.
-const DUPLICATE_SAVE_TOOLTIP: &str = "Duplicate binding: one combo or pad button must trigger only one action — re-bind one of the rows";
+/// Stage 3, catalog `hotkey.duplicate_tooltip`): one keyboard combo or pad
+/// button may trigger only one action, so saving waits until the draft is
+/// unique again.
+fn duplicate_save_tooltip() -> String {
+    rust_i18n::t!("hotkey.duplicate_tooltip").into_owned()
+}
 
 /// Status-icon colors (warning = red-orange, info = blue).
 const WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(246, 118, 100);
@@ -527,11 +632,11 @@ pub(crate) enum Tab {
 }
 
 impl Tab {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Tab::General => "General",
-            Tab::Hotkeys => "Hotkeys",
-            Tab::Overlay => "Overlay",
+            Tab::General => rust_i18n::t!("general.tab_general").into_owned(),
+            Tab::Hotkeys => rust_i18n::t!("general.tab_hotkeys").into_owned(),
+            Tab::Overlay => rust_i18n::t!("general.tab_overlay").into_owned(),
         }
     }
 }
@@ -645,9 +750,9 @@ pub(crate) fn clear_pad_binding(binding: &mut Binding) -> Binding {
 /// the binding itself (`binding_label`).
 pub(crate) fn bind_button_label(capturing: bool, key: &str, mods: &[String]) -> String {
     if capturing {
-        CAPTURE_BUTTON_LABEL.to_owned()
+        capture_button_label()
     } else if key.is_empty() {
-        KEY_UNBOUND_LABEL.to_owned()
+        key_unbound_label()
     } else {
         binding_label(key, mods)
     }
@@ -749,29 +854,35 @@ pub(crate) fn duplicate_bindings(draft: &Settings) -> Vec<DuplicateBinding> {
 }
 
 /// One keyboard-collision entry: names the other row and shows this row's
-/// own combo in canonical label form (§4.1 notation), e.g.
-/// "Duplicates Window: Alt+PrintScreen".
+/// own combo in canonical label form (§4.1 notation), localized via catalog
+/// `hotkey.duplicate_error`, e.g. "Duplicates Window: Alt+PrintScreen".
 fn keyboard_duplicate(action: Action, other: Action, binding: &Binding) -> DuplicateBinding {
     DuplicateBinding {
         action,
         other,
         kind: DuplicateKind::Keyboard,
-        description: format!(
-            "Duplicates {}: {}",
-            row_label(other),
-            binding_label(&binding.key, &binding.mods)
-        ),
+        description: rust_i18n::t!(
+            "hotkey.duplicate_error",
+            row = row_label(other),
+            combo = binding_label(&binding.key, &binding.mods)
+        )
+        .into_owned(),
     }
 }
 
 /// One pad-collision entry, same shape as [`keyboard_duplicate`] but naming
-/// the pad notation this row carries.
+/// the pad notation this row carries (catalog `hotkey.duplicate_pad_error`).
 fn pad_duplicate(action: Action, other: Action, pad: &str) -> DuplicateBinding {
     DuplicateBinding {
         action,
         other,
         kind: DuplicateKind::Pad,
-        description: format!("Duplicates {} pad: {pad}", row_label(other)),
+        description: rust_i18n::t!(
+            "hotkey.duplicate_pad_error",
+            row = row_label(other),
+            pad = pad
+        )
+        .into_owned(),
     }
 }
 
@@ -961,11 +1072,11 @@ pub(crate) fn pad_capture_target(
 /// notation once bound, and the click-to-bind prompt when empty.
 pub(crate) fn pad_field_label(pad_supported: bool, capturing: bool, pad: Option<&str>) -> String {
     if !pad_supported {
-        GAMEPAD_PLACEHOLDER_LABEL.to_owned()
+        gamepad_placeholder_label()
     } else if capturing {
-        PAD_CAPTURE_BUTTON_LABEL.to_owned()
+        pad_capture_button_label()
     } else {
-        pad.unwrap_or(PAD_UNBOUND_LABEL).to_owned()
+        pad.map_or_else(pad_unbound_label, |notation| notation.to_owned())
     }
 }
 
@@ -997,7 +1108,7 @@ pub(crate) fn icon_for_status(status: &Registration) -> Option<StatusIcon> {
         }),
         Registration::Reserved { .. } => Some(StatusIcon {
             kind: IconKind::Info,
-            tooltip: RESERVED_TOOLTIP.to_owned(),
+            tooltip: reserved_tooltip(),
         }),
     }
 }
@@ -1336,7 +1447,22 @@ impl SettingsApp {
             return;
         }
         match config::save(&self.draft, &self.config_path) {
-            Ok(()) => tracing::info!("Config saved: {}", self.config_path.display()),
+            Ok(()) => {
+                tracing::info!("Config saved: {}", self.config_path.display());
+                // Live locale switch (spec §2, Stage 2b): the SAVED draft is
+                // the source of truth, so switch only after the save succeeds
+                // (a failed save leaves the current locale alone), BEFORE the
+                // tray rebuild, so the rebuilt menu labels resolve in the new
+                // language — no restart needed.
+                rust_i18n::set_locale(locale_code_of(&self.draft));
+                if let Some(tray) = &self.tray {
+                    // Best-effort: a refused rebuild keeps the old-language
+                    // menu, which is cosmetic; the app stays alive (spec §5).
+                    if let Err(err) = tray.refresh_menu() {
+                        tracing::warn!("Tray menu rebuild failed: {err}");
+                    }
+                }
+            }
             Err(err) => tracing::error!("Config save failed: {err}"),
         }
         self.applied = self.draft.clone();
@@ -1625,14 +1751,33 @@ impl SettingsApp {
     }
 
     fn general_tab(&mut self, ui: &mut egui::Ui) {
+        // Language dropdown (spec §2 live locale switch, Stage 2b): FIRST row
+        // of the tab. The draft stores the canonical config code (Apply
+        // persists it and switches the locale — see `apply`), so `is_dirty`
+        // sees the change like any other draft field. Selected text and items
+        // show NATIVE names (`LANGUAGE_OPTIONS`), the row label is a catalog
+        // lookup.
+        egui::ComboBox::from_label(rust_i18n::t!("general.language_label"))
+            .selected_text(native_name(&self.draft.general.language))
+            .show_ui(ui, |ui| {
+                for (code, native) in LANGUAGE_OPTIONS {
+                    if ui
+                        .selectable_label(self.draft.general.language == code, native)
+                        .clicked()
+                    {
+                        self.draft.general.language = code.to_owned();
+                    }
+                }
+            });
+
         // The save-path row is rendered before the draft borrow is taken for
         // the rest of the tab: Browse rewrites `draft.general.save_path`
         // after the dialog returns (spec §4.4 — Apply persists it as usual).
-        ui.label("Save path");
+        ui.label(rust_i18n::t!("general.save_path_label"));
         let mut browse_clicked = false;
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.draft.general.save_path);
-            browse_clicked = ui.button("Browse").clicked();
+            browse_clicked = ui.button(rust_i18n::t!("general.browse_button")).clicked();
         });
         if browse_clicked {
             self.browse_save_path();
@@ -1640,10 +1785,10 @@ impl SettingsApp {
 
         let general = &mut self.draft.general;
 
-        ui.label("Full-screen template");
+        ui.label(rust_i18n::t!("general.full_screen_label"));
         ui.text_edit_singleline(&mut general.file_full_screen);
 
-        ui.label("Window template");
+        ui.label(rust_i18n::t!("general.window_label"));
         ui.text_edit_singleline(&mut general.file_window);
 
         // Placeholder reference (spec §4.2, Stage 6): the token table rendered
@@ -1651,7 +1796,7 @@ impl SettingsApp {
         // `template::render` accepts and never duplicates the list. Collapsed
         // by default (a reference, not a control); it is part of the tab's
         // vertical layout — no extra frame, no scrolling.
-        egui::CollapsingHeader::new("Placeholder reference")
+        egui::CollapsingHeader::new(rust_i18n::t!("general.placeholder_reference_header"))
             .id_salt("template_placeholder_reference")
             .default_open(false)
             .show(ui, |ui| {
@@ -1663,7 +1808,7 @@ impl SettingsApp {
                 }
             });
 
-        egui::ComboBox::from_label("Format")
+        egui::ComboBox::from_label(rust_i18n::t!("general.format_label"))
             .selected_text(format_label(general.format))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut general.format, Format::Png, "png");
@@ -1676,7 +1821,7 @@ impl SettingsApp {
                 general.format == Format::Jpeg,
                 egui::DragValue::new(&mut general.jpeg_quality).range(1..=100),
             );
-            ui.label("JPEG quality");
+            ui.label(rust_i18n::t!("general.jpeg_quality_label"));
         });
 
         ui.horizontal(|ui| {
@@ -1684,7 +1829,7 @@ impl SettingsApp {
                 general.format == Format::Webp,
                 egui::DragValue::new(&mut general.webp_quality).range(1..=100),
             );
-            ui.label("WebP quality (WebP is lossless in MVP — quality not applied yet)");
+            ui.label(rust_i18n::t!("general.webp_quality_label"));
         });
     }
 
@@ -1744,7 +1889,7 @@ impl SettingsApp {
     /// → bind-by-press.
     fn hotkeys_tab(&mut self, ui: &mut egui::Ui) {
         // Always shown (§4.4, v8): the capture state does not gate it.
-        ui.label(BIND_HINT);
+        ui.label(bind_hint());
 
         egui::Grid::new("hotkeys_grid")
             .num_columns(3)
@@ -1800,7 +1945,7 @@ impl SettingsApp {
                             let button = egui::Button::new(label)
                                 .min_size(egui::Vec2::new(BIND_BUTTON_MIN_WIDTH, 0.0));
                             let response = if capturing {
-                                ui.add(button).on_hover_text(CAPTURE_TOOLTIP)
+                                ui.add(button).on_hover_text(capture_tooltip())
                             } else {
                                 ui.add(button)
                             };
@@ -1808,7 +1953,7 @@ impl SettingsApp {
                             // 0.37), and both tooltip methods consume the
                             // response, so the result is rebound, not cloned.
                             let response = if reserved {
-                                response.on_disabled_hover_text(RESERVED_TOOLTIP)
+                                response.on_disabled_hover_text(reserved_tooltip())
                             } else {
                                 response
                             };
@@ -1853,14 +1998,14 @@ impl SettingsApp {
                                 let pad_button = egui::Button::new(pad_label)
                                     .min_size(egui::Vec2::new(BIND_BUTTON_MIN_WIDTH, 0.0));
                                 let pad_response = if pad_capturing {
-                                    ui.add(pad_button).on_hover_text(PAD_CAPTURE_TOOLTIP)
+                                    ui.add(pad_button).on_hover_text(pad_capture_tooltip())
                                 } else {
-                                    ui.add(pad_button).on_hover_text(PAD_BIND_TOOLTIP)
+                                    ui.add(pad_button).on_hover_text(pad_bind_tooltip())
                                 };
                                 // Same disabled-tooltip rule as the bind button:
                                 // the tooltip methods consume the response.
                                 let pad_response = if reserved {
-                                    pad_response.on_disabled_hover_text(RESERVED_TOOLTIP)
+                                    pad_response.on_disabled_hover_text(reserved_tooltip())
                                 } else {
                                     pad_response
                                 };
@@ -1871,7 +2016,10 @@ impl SettingsApp {
                                     }
                                 }
                             } else {
-                                ui.add_enabled(false, egui::Button::new(GAMEPAD_PLACEHOLDER_LABEL));
+                                ui.add_enabled(
+                                    false,
+                                    egui::Button::new(gamepad_placeholder_label()),
+                                );
                             }
                         });
                     });
@@ -1881,7 +2029,7 @@ impl SettingsApp {
             });
 
         if self.controller.is_none() {
-            ui.label("Hotkeys unavailable on this host (see log)");
+            ui.label(rust_i18n::t!("hotkey.unavailable_label"));
         }
     }
 
@@ -1893,9 +2041,12 @@ impl SettingsApp {
         let mut test_chip: Option<Toast> = None;
 
         ui.horizontal(|ui| {
-            ui.checkbox(&mut overlay.enabled, "Show overlay toast");
+            ui.checkbox(&mut overlay.enabled, rust_i18n::t!("overlay.enabled_label"));
             let enabled = overlay_test_button_enabled(overlay.enabled);
-            let test = ui.add_enabled(enabled, egui::Button::new("Test overlay"));
+            let test = ui.add_enabled(
+                enabled,
+                egui::Button::new(rust_i18n::t!("overlay.test_button")),
+            );
             if enabled {
                 if test.clicked() {
                     test_chip = Some(test_overlay_toast(overlay));
@@ -1903,20 +2054,24 @@ impl SettingsApp {
             } else {
                 // `on_disabled_hover_text` consumes the response; a disabled
                 // button can never be clicked, so the branches are exclusive.
-                test.on_disabled_hover_text(OVERLAY_TEST_DISABLED_HINT);
+                test.on_disabled_hover_text(overlay_test_disabled_hint());
             }
         });
 
         ui.horizontal(|ui| {
+            // Catalog `overlay.duration_suffix` is `" ms"` — the leading space
+            // is part of the text, so the suffix renders byte-for-byte like
+            // the old literal.
+            let duration_suffix = rust_i18n::t!("overlay.duration_suffix").into_owned();
             ui.add(
                 egui::DragValue::new(&mut overlay.duration_ms)
                     .range(250..=10_000)
-                    .suffix(" ms"),
+                    .suffix(duration_suffix.as_str()),
             );
-            ui.label("Duration");
+            ui.label(rust_i18n::t!("overlay.duration_label"));
         });
 
-        egui::ComboBox::from_label("Position")
+        egui::ComboBox::from_label(rust_i18n::t!("overlay.position_label"))
             .selected_text(position_label(overlay.position))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut overlay.position, OverlayPosition::TopLeft, "TopLeft");
@@ -1933,8 +2088,11 @@ impl SettingsApp {
                 );
             });
 
-        ui.checkbox(&mut overlay.on_all_monitors, "Show on all monitors");
-        ui.label("(one toast per monitor when enabled, otherwise on the primary monitor)");
+        ui.checkbox(
+            &mut overlay.on_all_monitors,
+            rust_i18n::t!("overlay.on_all_monitors_label"),
+        );
+        ui.label(rust_i18n::t!("overlay.all_monitors_hint"));
 
         if let Some(chip) = test_chip {
             self.publish_overlay_test_chip(chip);
@@ -2111,9 +2269,9 @@ impl eframe::App for SettingsApp {
             let savable = !unbound && duplicates.is_empty();
             let buttons = bottom_buttons_enabled(is_dirty(&self.draft, &self.applied), savable);
             let blocked_tooltip = if unbound {
-                Some(UNBOUND_SAVE_TOOLTIP)
+                Some(unbound_save_tooltip())
             } else if !duplicates.is_empty() {
-                Some(DUPLICATE_SAVE_TOOLTIP)
+                Some(duplicate_save_tooltip())
             } else {
                 None
             };
@@ -2122,20 +2280,28 @@ impl eframe::App for SettingsApp {
             let mut cancel_clicked = false;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 cancel_clicked = ui
-                    .add_enabled(buttons.cancel_enabled, egui::Button::new("Cancel"))
+                    .add_enabled(
+                        buttons.cancel_enabled,
+                        egui::Button::new(rust_i18n::t!("bottom.cancel")),
+                    )
                     .clicked();
-                let ok_response = ui.add_enabled(buttons.ok_enabled, egui::Button::new("OK"));
-                let apply_response =
-                    ui.add_enabled(buttons.apply_enabled, egui::Button::new("Apply"));
+                let ok_response = ui.add_enabled(
+                    buttons.ok_enabled,
+                    egui::Button::new(rust_i18n::t!("bottom.ok")),
+                );
+                let apply_response = ui.add_enabled(
+                    buttons.apply_enabled,
+                    egui::Button::new(rust_i18n::t!("bottom.apply")),
+                );
                 // Only a blocked save gets a hint: a clean draft is disabled
                 // for dirtiness alone and needs no tooltip. The tooltip method
                 // consumes the response, so it is rebound.
-                let ok_response = if let Some(tooltip) = blocked_tooltip {
+                let ok_response = if let Some(tooltip) = &blocked_tooltip {
                     ok_response.on_disabled_hover_text(tooltip)
                 } else {
                     ok_response
                 };
-                let apply_response = if let Some(tooltip) = blocked_tooltip {
+                let apply_response = if let Some(tooltip) = &blocked_tooltip {
                     apply_response.on_disabled_hover_text(tooltip)
                 } else {
                     apply_response
@@ -2143,7 +2309,7 @@ impl eframe::App for SettingsApp {
                 ok_clicked = ok_response.clicked();
                 apply_clicked = apply_response.clicked();
                 if is_dirty(&self.draft, &self.applied) {
-                    ui.label("Unsaved changes");
+                    ui.label(rust_i18n::t!("bottom.unsaved_changes"));
                 }
             });
 
@@ -2295,7 +2461,7 @@ pub(crate) fn run(
     pad_capture: PadCaptureMailbox,
 ) -> Result<(), Error> {
     let viewport = egui::ViewportBuilder::default()
-        .with_title("virshot — Settings")
+        .with_title(rust_i18n::t!("bottom.window_title"))
         .with_inner_size([INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT])
         // eframe derives the alpha-capable GL config from the ROOT viewport
         // builder; the toast child viewports need it to be transparent.
@@ -2327,6 +2493,11 @@ pub(crate) fn run(
         "virshot",
         options,
         Box::new(move |cc| {
+            // Font fallback for the localized UI (spec §2): the bundled faces cover
+            // Latin + Cyrillic only, so zh-CN/ja/ko glyphs would render as tofu.
+            // Installed BEFORE the first frame and shared by every viewport of this
+            // context — settings window, toast chips, overlay all localize.
+            fonts::install(&cc.egui_ctx);
             // Toast stack (spec §4.3): the host backend holds the monitor
             // geometry, the timer thread owns chip lifetimes, and the wake
             // context repaints this loop on fade ticks.

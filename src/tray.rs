@@ -50,18 +50,71 @@ pub(crate) enum Error {
     TrayUnavailable { message: String },
 }
 
-/// Menu labels — exact spec §4.5 wording (English UI, spec §2 i18n note).
-pub(crate) const MENU_LABEL_TAKE_SCREENSHOT: &str = "Take screenshot";
-pub(crate) const MENU_LABEL_SETTINGS: &str = "Settings";
-pub(crate) const MENU_LABEL_EXIT: &str = "Exit";
+/// Wrap a backend/muda failure into the typed [`Error`]; startup (`new`) and
+/// the menu rebuild (`refresh_menu`) report failures the same way.
+fn unavailable(message: String) -> Error {
+    Error::TrayUnavailable { message }
+}
+
+/// Menu labels — spec §4.5 wording, resolved from the catalog (spec §2:
+/// `tray.take_screenshot` / `tray.settings` / `tray.exit`).
+fn take_screenshot_label() -> String {
+    rust_i18n::t!("tray.take_screenshot").into_owned()
+}
+
+fn settings_label() -> String {
+    rust_i18n::t!("tray.settings").into_owned()
+}
+
+fn exit_label() -> String {
+    rust_i18n::t!("tray.exit").into_owned()
+}
 
 /// Internal menu item ids (mapped back onto actions in [`poll`]).
 const MENU_ID_TAKE_SCREENSHOT: &str = "virshot-take-screenshot";
 const MENU_ID_SETTINGS: &str = "virshot-settings";
 const MENU_ID_EXIT: &str = "virshot-exit";
 
-/// Tooltip shown by hosts that support one (ksni exposes it).
-const TOOLTIP: &str = "virshot";
+/// Tooltip shown by hosts that support one (ksni exposes it) — catalog
+/// `tray.tooltip`.
+fn tooltip() -> String {
+    rust_i18n::t!("tray.tooltip").into_owned()
+}
+
+/// The menu label trio, in menu order — the single seam that BOTH menu paths
+/// render ([`build_menu`] reads it), so the startup menu and the post-Apply
+/// rebuild can never drift from each other or from the catalog (spec §2).
+pub(crate) fn menu_labels() -> (String, String, String) {
+    (take_screenshot_label(), settings_label(), exit_label())
+}
+
+/// Build the §4.5 menu with every label resolved from the CURRENT locale.
+/// Startup (`TrayController::new`) and the post-Apply locale switch
+/// (`TrayController::refresh_menu`) run THIS builder, so ids, order, and
+/// labels have one source and a locale change cannot drift the two paths.
+/// Failure mode: muda rejects attaching an item already part of a menu
+/// (`Menu::append`); freshly built items never hit it, and callers log and
+/// keep running.
+fn build_menu() -> Result<Menu, Error> {
+    let menu = Menu::new();
+    let (take, settings, exit) = menu_labels();
+
+    menu.append(&MenuItem::with_id(
+        MENU_ID_TAKE_SCREENSHOT,
+        take,
+        true,
+        None,
+    ))
+    .map_err(|err| unavailable(err.to_string()))?;
+    menu.append(&PredefinedMenuItem::separator())
+        .map_err(|err| unavailable(err.to_string()))?;
+    menu.append(&MenuItem::with_id(MENU_ID_SETTINGS, settings, true, None))
+        .map_err(|err| unavailable(err.to_string()))?;
+    menu.append(&MenuItem::with_id(MENU_ID_EXIT, exit, true, None))
+        .map_err(|err| unavailable(err.to_string()))?;
+
+    Ok(menu)
+}
 
 /// Tray icon source: decode the embedded app-icon asset (`icons::APP_ICON_PNG`,
 /// 128×128 RGBA PNG) into the buffer + dimensions `Icon::from_rgba` expects.
@@ -113,43 +166,15 @@ impl TrayController {
     /// bus, no registered StatusNotifier host). The caller logs the typed
     /// error and continues without a tray.
     pub(crate) fn new() -> Result<Self, Error> {
-        fn unavailable(message: String) -> Error {
-            Error::TrayUnavailable { message }
-        }
-
         let (rgba, width, height) = app_icon_rgba().map_err(|err| unavailable(err.to_string()))?;
         let icon =
             Icon::from_rgba(rgba, width, height).map_err(|err| unavailable(err.to_string()))?;
-
-        let menu = Menu::new();
-        menu.append(&MenuItem::with_id(
-            MENU_ID_TAKE_SCREENSHOT,
-            MENU_LABEL_TAKE_SCREENSHOT,
-            true,
-            None,
-        ))
-        .map_err(|err| unavailable(err.to_string()))?;
-        menu.append(&PredefinedMenuItem::separator())
-            .map_err(|err| unavailable(err.to_string()))?;
-        menu.append(&MenuItem::with_id(
-            MENU_ID_SETTINGS,
-            MENU_LABEL_SETTINGS,
-            true,
-            None,
-        ))
-        .map_err(|err| unavailable(err.to_string()))?;
-        menu.append(&MenuItem::with_id(
-            MENU_ID_EXIT,
-            MENU_LABEL_EXIT,
-            true,
-            None,
-        ))
-        .map_err(|err| unavailable(err.to_string()))?;
+        let menu = build_menu()?;
 
         let tray = TrayIconBuilder::new()
             .with_icon(icon)
             .with_menu(Box::new(menu))
-            .with_tooltip(TOOLTIP)
+            .with_tooltip(tooltip())
             // Left click must open the window, not pop the menu (spec §4.5);
             // right click keeps the menu. Linux hosts ignore these flags:
             // ksni emits the left-click event and the host shows the menu.
@@ -158,6 +183,23 @@ impl TrayController {
             .map_err(|err| unavailable(err.to_string()))?;
 
         Ok(Self { tray })
+    }
+
+    /// Rebuild the menu item labels for the CURRENT locale (spec §2 live
+    /// locale switch, Stage 2b): `TrayIcon::set_menu` replaces the whole menu,
+    /// and this runs the same [`build_menu`] as startup, so after
+    /// `rust_i18n::set_locale` the tray menu shows the new language without a
+    /// restart.
+    /// Failure mode: [`build_menu`] rejecting an item. `set_menu` itself is
+    /// infallible in tray-icon 0.26.1 — verified in the locked source
+    /// (`lib.rs:574`: `pub fn set_menu(&self, menu: Option<Box<dyn
+    /// menu::ContextMenu>>)`, returns nothing), so a built menu always reaches
+    /// the backend. The tooltip is left alone: catalog `tray.tooltip` is
+    /// "virshot", locale-independent.
+    pub(crate) fn refresh_menu(&self) -> Result<(), Error> {
+        let menu = build_menu()?;
+        self.tray.set_menu(Some(Box::new(menu)));
+        Ok(())
     }
 
     /// Drain both event receivers without blocking and return the mapped

@@ -63,9 +63,24 @@
 #![forbid(unsafe_code)]
 #![windows_subsystem = "windows"]
 
+// rust-i18n init lives at the CRATE ROOT: `rust_i18n::t!` expands to
+// `crate::_rust_i18n_t!`, so this call must be in main.rs for `t!` to resolve
+// anywhere in the crate; catalogs are embedded at build time from `locales/`.
+// `fallback = "en"` is required — without it a miss returns the dotted key.
+rust_i18n::i18n!("locales", fallback = "en");
+
+// Cargo does not track `locales/app.yml` for this crate: rust-i18n reads the
+// catalog during macro expansion, and its build script's `rerun-if-changed`
+// scope is the rust-i18n crate's own directory, so rustc's dep-info never
+// lists the catalog — editing a translation would ship stale strings without
+// a rebuild. `include_str!` adds a tracked dep-info edge, so catalog edits
+// recompile this crate.
+const I18N_CATALOG_SOURCE: &str = include_str!("../locales/app.yml");
+
 mod bindings;
 mod capture;
 mod config;
+mod fonts;
 mod gamepad;
 mod gui;
 mod hotkeys;
@@ -324,6 +339,17 @@ fn apply_out_override(general: &mut General, out: &Path) -> bool {
 /// tray `Exit` ends the park loop (exit 0).
 fn run_resident(config_path: &Path) -> ExitCode {
     let settings = config::load_or_create(config_path);
+    // Locale for the resident UI (spec §2): set right after the config load
+    // and BEFORE the tray, hotkey status logs, and the GUI, so every label
+    // built later resolves in the configured language (`language` is already
+    // normalized to a known code by `config::load_or_default`). Headless
+    // `shot` deliberately keeps the process-default English (spec §2: CLI,
+    // `--help`, and stderr stay English).
+    rust_i18n::set_locale(config::language_code(&settings.general.language));
+    // Startup-only diagnostic (never in the event loop or capture path): a
+    // non-test use that keeps `I18N_CATALOG_SOURCE` alive, so the const above
+    // stays a real dep-info edge without a dead-code warning.
+    tracing::debug!("i18n catalog loaded: {} bytes", I18N_CATALOG_SOURCE.len());
     // Single-instance guard (spec §1): one resident process per config file.
     // Acquired here — after logging and the config load, before the tray,
     // hotkeys, and GUI — and held for the whole process lifetime, so `Drop`
@@ -489,3 +515,7 @@ fn log_registrations(status: &hotkeys::StartStatus) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "i18n.tests.rs"]
+mod i18n_tests;

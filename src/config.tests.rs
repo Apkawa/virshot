@@ -640,6 +640,7 @@ fn save_then_load_round_trip_preserves_settings() {
     let path = dir.config_path("config.toml");
     let settings = Settings {
         general: General {
+            language: "en".to_owned(),
             save_path: "D:\\shots".to_owned(),
             file_full_screen: "%iso.%ext".to_owned(),
             file_window: "%t-%iso.%ext".to_owned(),
@@ -667,6 +668,91 @@ fn save_then_load_round_trip_preserves_settings() {
     save(&settings, &path).expect("save must succeed");
     let loaded = load(&path).expect("saved config must load back");
 
+    assert_eq!(loaded, settings);
+}
+
+// ---------- language (spec §7: `general.language`, lenient normalization) ----------
+
+#[test]
+fn general_default_language_is_english() {
+    let general = general_with_home(Some(Path::new("/home/u")));
+
+    assert_eq!(general.language, "en");
+}
+
+#[test]
+fn load_partial_toml_fills_language_default() {
+    // An old config predating the `language` key must get the default
+    // without touching any other section.
+    let dir = TempDir::new("partial-language");
+    let path = dir.config_path("config.toml");
+    std::fs::write(&path, "[overlay]\nenabled = false\n").expect("fixture must be writable");
+
+    let settings = load(&path).expect("partial config must load");
+
+    assert_eq!(settings.general.language, "en");
+    assert_eq!(settings.general, General::default());
+    assert_eq!(settings.controls, Controls::default());
+    assert!(!settings.overlay.enabled);
+    assert_eq!(settings.overlay.position, OverlayPosition::BottomRight);
+    assert_eq!(settings.overlay.duration_ms, 2000);
+    assert!(settings.overlay.on_all_monitors);
+}
+
+#[test]
+fn load_unknown_language_normalizes_to_english_but_keeps_other_settings() {
+    // Lenient policy (spec §7): a broken `language` repairs to `en` while
+    // every other setting survives. A strict enum would fail the parse and
+    // `load_or_default` would reset ALL settings to defaults — forbidden.
+    let dir = TempDir::new("bad-language");
+    let path = dir.config_path("config.toml");
+    std::fs::write(
+        &path,
+        "[general]\nlanguage = \"de\"\nsave_path = \"/tmp/keepme\"\nformat = \"jpg\"\n",
+    )
+    .expect("fixture must be writable");
+
+    // The startup path is `load_or_default`; that is where normalization runs.
+    let settings = load_or_default(&path);
+
+    assert_eq!(settings.general.language, "en");
+    assert_eq!(settings.general.save_path, "/tmp/keepme");
+    assert_eq!(settings.general.format, Format::Jpeg);
+}
+
+#[test]
+fn language_code_maps_all_known_locales() {
+    assert_eq!(language_code("en"), "en");
+    assert_eq!(language_code("ru"), "ru");
+    assert_eq!(language_code("zh-CN"), "zh-CN");
+    assert_eq!(language_code("es"), "es");
+    assert_eq!(language_code("ja"), "ja");
+    assert_eq!(language_code("ko"), "ko");
+
+    // Anything else normalizes to `en`: empty, an unknown code, the wrong
+    // Japanese code (`jp`, not `ja`), and case/padding variants.
+    assert_eq!(language_code(""), "en");
+    assert_eq!(language_code("de"), "en");
+    assert_eq!(language_code("JP"), "en");
+    assert_eq!(language_code("RU "), "en");
+}
+
+#[test]
+fn save_then_load_round_trip_preserves_language() {
+    let dir = TempDir::new("language-round-trip");
+    let path = dir.config_path("config.toml");
+    let settings = Settings {
+        general: General {
+            language: "ru".to_owned(),
+            ..General::default()
+        },
+        ..Settings::default()
+    };
+
+    save(&settings, &path).expect("save must succeed");
+    let loaded = load(&path).expect("saved config must load back");
+
+    assert_eq!(loaded.general.language, "ru");
     assert_eq!(loaded, settings);
 }
 

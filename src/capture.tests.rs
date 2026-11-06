@@ -4,6 +4,7 @@ use super::CaptureMode;
 use super::Error;
 use super::WindowProbe;
 use super::attach_handoff;
+use super::chip_text;
 use super::encode_image;
 use super::handoff_handle;
 use super::new_handoff;
@@ -31,9 +32,25 @@ use overlay::OverlayHost;
 use std::error::Error as _;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 use toast::MonitorSel;
 use toast::ToastColor;
 use toast::ToastService;
+
+/// Serializes every test that reads or writes the process-wide locale —
+/// `rust_i18n::locale()` is a process-wide global with a per-thread cache, so
+/// locale-touching tests must not run in parallel (same pattern as
+/// `i18n.tests.rs`).
+static LOCALE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take the locale lock; a poisoned lock (a panic in another locale test) is
+/// recovered rather than unwrapped, like every other mailbox in this crate.
+fn locale_guard() -> MutexGuard<'static, ()> {
+    LOCALE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Fixed injected instant: 2026-11-03 00:12:05 local — the spec §4.2
 /// `%iso` example. Time is always injected; the module boundary stamps
@@ -330,9 +347,9 @@ fn error_template_variant_keeps_template_error_as_source() {
 }
 
 #[test]
-fn error_monitor_variant_with_source_displays_context_message() {
-    let err = Error::Monitor {
-        message: "failed to capture window image: Not supported".to_owned(),
+fn error_window_capture_failed_with_source_displays_context_message() {
+    let err = Error::WindowCaptureFailed {
+        reason: "Not supported".to_owned(),
         source: Some(Box::new(xcap::XCapError::NotSupported)),
     };
     assert_eq!(
@@ -343,11 +360,8 @@ fn error_monitor_variant_with_source_displays_context_message() {
 }
 
 #[test]
-fn error_monitor_variant_without_source_reports_no_monitors() {
-    let err = Error::Monitor {
-        message: "no monitors found".to_owned(),
-        source: None,
-    };
+fn error_no_monitors_found_reports_no_monitors() {
+    let err = Error::NoMonitorsFound;
     assert_eq!(err.to_string(), "no monitors found");
     assert!(err.source().is_none(), "no xcap error to report here");
 }
@@ -390,6 +404,46 @@ fn error_io_variant_includes_path_and_source() {
         "source message missing: {msg}"
     );
     assert!(err.source().is_some(), "io error must be kept as source");
+}
+
+/// Spec §2: `capture::Error`'s `Display` is the English contract for logs and
+/// headless CLI output — it never consults the catalog, so switching the UI
+/// locale must not localize it (the chip path is separate, see `chip_text`).
+#[test]
+fn error_display_stays_english_under_russian_locale() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("ru");
+
+    let no_window = Error::NoActiveWindow.to_string();
+    let save = Error::Save {
+        path: PathBuf::from("./.tmp/capture-test-locale/x.png"),
+        source: image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "disk refused the write",
+        )),
+    }
+    .to_string();
+    let io = Error::Io {
+        path: PathBuf::from("./.tmp/capture-test-locale/FullScreen"),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "directory vanished"),
+    }
+    .to_string();
+
+    // Restore BEFORE the assertions so a failure never leaves `ru` installed.
+    rust_i18n::set_locale("en");
+
+    assert_eq!(
+        no_window, "no active window",
+        "Display must stay English under the ru locale"
+    );
+    assert!(
+        save.contains("failed to save"),
+        "Save Display must keep the English prefix: {save}"
+    );
+    assert!(
+        io.contains("failed to create output directory"),
+        "Io Display must keep the English prefix: {io}"
+    );
 }
 
 // ---------- toast chip from outcome (spec §4.3) ----------
@@ -510,6 +564,80 @@ fn toast_from_outcome_error_is_a_danger_chip_with_the_verbatim_message() {
         "spec §4.2 requires exactly 'no active window' in the toast"
     );
     assert_eq!(chip.color, ToastColor::Danger, "failures are danger chips");
+}
+
+/// Under the default `en` locale the catalog `toast.*` values are the original
+/// English messages (spec §2), so the localized chip mapping must produce the
+/// `Display` text byte-for-byte — for every variant, through `chip_text` and
+/// through the chip the toast path actually shows.
+#[test]
+fn chip_text_matches_display_text_under_english_locale() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    let errors = vec![
+        Error::NoActiveWindow,
+        Error::Template {
+            source: template::Error::UnknownToken {
+                token: "%month".to_owned(),
+                template: "%month.%ext".to_owned(),
+            },
+        },
+        Error::Save {
+            path: PathBuf::from("./.tmp/capture-test-chip/x.png"),
+            source: image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "disk refused the write",
+            )),
+        },
+        Error::Io {
+            path: PathBuf::from("./.tmp/capture-test-chip/FullScreen"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "directory vanished"),
+        },
+        Error::TooManyCollisions {
+            path: PathBuf::from("./.tmp/capture-test-chip"),
+            limit: COLLISION_MAX_COUNTERS,
+        },
+        Error::MonitorCaptureFailed {
+            reason: "Not supported".to_owned(),
+            source: Some(Box::new(xcap::XCapError::NotSupported)),
+        },
+        Error::WindowTitleFailed {
+            reason: "Not supported".to_owned(),
+            source: Some(Box::new(xcap::XCapError::NotSupported)),
+        },
+        Error::WindowCaptureFailed {
+            reason: "Not supported".to_owned(),
+            source: Some(Box::new(xcap::XCapError::NotSupported)),
+        },
+        Error::WindowListFailed {
+            reason: "Not supported".to_owned(),
+            source: Some(Box::new(xcap::XCapError::NotSupported)),
+        },
+        Error::MonitorListFailed {
+            reason: "Not supported".to_owned(),
+            source: Some(Box::new(xcap::XCapError::NotSupported)),
+        },
+        Error::NoMonitorsFound,
+    ];
+
+    for err in errors {
+        let display = err.to_string();
+        assert_eq!(
+            chip_text(&err),
+            display,
+            "chip mapping must equal the Display text byte-for-byte"
+        );
+        let chip = toast_from_outcome(
+            &Err::<PathBuf, Error>(err),
+            &overlay(OverlayPosition::BottomRight, true, false, 2000),
+        )
+        .expect("a failed capture always produces a chip");
+        assert_eq!(
+            chip.text, display,
+            "the shown chip must equal the Display text byte-for-byte"
+        );
+    }
 }
 
 #[test]
@@ -660,4 +788,79 @@ fn run_capture_full_screen_writes_valid_file() {
         decoded.width() > 0 && decoded.height() > 0,
         "captured image must not be empty"
     );
+}
+
+/// Spec §2: the chip path localizes while the `Display` path (logs and the
+/// headless CLI) does not. Under `ru` both chips render Russian catalog
+/// text, but `Error::to_string()` captured under the same locale keeps the
+/// English contract. `ru` is restored BEFORE the assertions.
+#[test]
+fn chip_text_renders_in_russian_under_ru_locale() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("ru");
+
+    let no_window = chip_text(&Error::NoActiveWindow);
+    let save = chip_text(&Error::Save {
+        path: PathBuf::from("./.tmp/capture-test-locale/x.png"),
+        source: image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "disk refused the write",
+        )),
+    });
+    // Captured under ru on purpose: Display must NOT follow the UI locale.
+    let display = Error::NoActiveWindow.to_string();
+
+    rust_i18n::set_locale("en");
+
+    assert_eq!(
+        no_window, "нет активного окна",
+        "the chip must render the Russian toast text under ru"
+    );
+    assert!(
+        save.starts_with("не удалось сохранить"),
+        "the Save chip must carry the Russian prefix, got {save}"
+    );
+    assert!(
+        save.contains("disk refused the write"),
+        "the source reason stays verbatim in the chip, got {save}"
+    );
+    assert_eq!(
+        display, "no active window",
+        "Display must stay English for logs/CLI even when captured under ru"
+    );
+}
+
+/// Stage 4 (spec §2): under each new locale the chip path localizes to that
+/// locale's catalog text while the `Display` path (logs and the headless
+/// CLI) stays English. `en` is restored BEFORE each assertion.
+#[test]
+fn chip_text_renders_in_each_locale_and_display_stays_english() {
+    let _guard = locale_guard();
+    let expected: [(&str, &str); 4] = [
+        ("zh-CN", "没有活动窗口"),
+        ("es", "ninguna ventana activa"),
+        ("ja", "アクティブなウィンドウなし"),
+        ("ko", "활성 창 없음"),
+    ];
+
+    for (locale, chip) in expected {
+        rust_i18n::set_locale(locale);
+        let no_window = chip_text(&Error::NoActiveWindow);
+        // Captured under the locale on purpose: Display must NOT follow it.
+        let display = Error::NoActiveWindow.to_string();
+        rust_i18n::set_locale("en");
+
+        assert_eq!(
+            no_window, chip,
+            "the chip must render the {locale} toast text under {locale}"
+        );
+        assert_ne!(
+            no_window, "no active window",
+            "the chip must not stay English under {locale}, got {no_window}"
+        );
+        assert_eq!(
+            display, "no active window",
+            "Display must stay English for logs/CLI even when captured under {locale}"
+        );
+    }
 }
