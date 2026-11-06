@@ -460,8 +460,10 @@ fn park_without_gui(tray: Option<tray::TrayController>, settings: Settings, hand
 }
 
 /// Registration report (spec §4.1): registered combos at INFO, the reserved
-/// rect action at INFO, rejected combos at ERROR with the crate's reason. The
-/// app keeps running in every case.
+/// rect action at INFO, rejected combos at ERROR with a READABLE reason
+/// (spec §4.1 v2 — the reason names the combo and the remedy, not the crate's
+/// `Debug` dump) plus the Stage 13 focus-retry hint. The app keeps running in
+/// every case.
 fn log_registrations(status: &hotkeys::StartStatus) {
     for registration in &status.registrations {
         match registration {
@@ -474,7 +476,7 @@ fn log_registrations(status: &hotkeys::StartStatus) {
                 reason,
             } => {
                 tracing::error!(
-                    "Hotkey not registered: {combo} ({}): {reason}",
+                    "Hotkey not registered: {combo} ({}): {reason} — retried when the settings window gains focus",
                     action.label()
                 );
             }

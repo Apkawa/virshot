@@ -116,6 +116,8 @@ fn newly_pressed_held_button_is_not_relisted() {
 
 #[test]
 fn pad_notation_controller_is_raw_unknown_index() {
+    // Without a device-info label (the Linux stub has no registry) the notation
+    // falls back to the raw bit index — still accepted by `parse_pad` (§9).
     assert_eq!(
         pad_notation(PadDownEvent::Controller {
             device: 0,
@@ -481,4 +483,163 @@ fn shared_gate_gates_actions_independently() {
         Action::FullScreen,
         at_ms(20)
     ));
+}
+
+#[test]
+fn pad_notation_with_label_prefers_device_label_over_raw_index() {
+    // Stage 5 (§4.1): the device-info label is the human-readable notation;
+    // the raw index is only the fallback. An empty label is not a name.
+    assert_eq!(
+        pad_notation_with_label(
+            PadDownEvent::Controller {
+                device: 0,
+                index: 7
+            },
+            Some("XboxX")
+        ),
+        "XboxX"
+    );
+    assert_eq!(
+        pad_notation_with_label(
+            PadDownEvent::Controller {
+                device: 0,
+                index: 7
+            },
+            Some("")
+        ),
+        "unknown:7"
+    );
+}
+
+#[test]
+fn pad_notation_with_label_falls_back_to_unknown_index_without_label() {
+    assert_eq!(
+        pad_notation_with_label(
+            PadDownEvent::Controller {
+                device: 1,
+                index: 3
+            },
+            None
+        ),
+        "unknown:3"
+    );
+}
+
+#[test]
+fn pad_notation_with_label_keeps_guide_and_share_names() {
+    // System buttons have no device-info label slot (§9): their names ARE the
+    // notation, whatever label (if any) the caller hands in.
+    assert_eq!(
+        pad_notation_with_label(PadDownEvent::Guide, Some("XboxGuide")),
+        "Guide"
+    );
+    assert_eq!(pad_notation_with_label(PadDownEvent::Share, None), "Share");
+}
+
+#[test]
+fn pad_index_for_name_resolves_first_matching_device_label() {
+    // Device-dependent mapping: index→name comes from device-info, never a
+    // static table. Device order wins ties — device 0 labels XboxX at 3 even
+    // though device 1 labels it at 9.
+    let label_of = |device: usize, index: usize| match (device, index) {
+        (0, 3) | (1, 9) => Some("XboxX".to_owned()),
+        (1, 16) => Some("XboxLeftTrigger".to_owned()),
+        _ => None,
+    };
+    assert_eq!(pad_index_for_name("XboxX", &[0, 1], label_of), Some(3));
+    assert_eq!(
+        pad_index_for_name("XboxLeftTrigger", &[0, 1], label_of),
+        Some(16)
+    );
+    assert_eq!(pad_index_for_name("XboxX", &[1], label_of), Some(9));
+    // Case-insensitive: config spelling may differ from the device's.
+    assert_eq!(pad_index_for_name("xboxx", &[1], label_of), Some(9));
+}
+
+#[test]
+fn pad_index_for_name_returns_none_without_any_matching_label() {
+    // Unlabeled devices (v0, disconnected) and unknown names resolve to nothing.
+    assert_eq!(
+        pad_index_for_name("XboxX", &[0, 1], |_device: usize, _index: usize| None),
+        None
+    );
+    assert_eq!(
+        pad_index_for_name("XboxY", &[0], |device: usize, index: usize| (device == 0
+            && index == 9)
+            .then(|| "XboxX".to_owned())),
+        None
+    );
+}
+
+#[test]
+fn pad_notation_named_round_trips_through_parse_pad() {
+    // A label written by the capture path must parse back (the UI writes it
+    // into config verbatim) and resolve back to the pressed index.
+    let notation = pad_notation_with_label(
+        PadDownEvent::Controller {
+            device: 0,
+            index: 9,
+        },
+        Some("XboxX"),
+    );
+    let mut controls = Controls::default();
+    controls.full_screen.pad = Some(notation);
+    let parsed = bindings::parse_controls(&controls).expect("label notation must parse");
+
+    assert_eq!(
+        pad_triggers(&parsed),
+        vec![(Action::FullScreen, PadBind::Named("XboxX".to_owned()))]
+    );
+    assert_eq!(
+        pad_index_for_name("XboxX", &[0], |device: usize, index: usize| (device == 0
+            && index == 9)
+            .then(|| "XboxX".to_owned())),
+        Some(9)
+    );
+}
+
+#[test]
+fn resolve_pad_binds_named_bind_becomes_controller_index() {
+    // Resolution maps a name to the live bit index through device-info; the
+    // already-indexed and system binds pass through untouched, config order kept.
+    let label_of =
+        |device: usize, index: usize| (device == 0 && index == 9).then(|| "XboxX".to_owned());
+    let triggers = vec![
+        (Action::FullScreen, PadBind::Named("XboxX".to_owned())),
+        (Action::Window, PadBind::Controller(4)),
+        (Action::FullScreen, PadBind::Guide),
+    ];
+    let (resolved, unresolved) = resolve_pad_binds(&triggers, &[0], label_of);
+    assert_eq!(
+        resolved,
+        vec![
+            (Action::FullScreen, PadBind::Controller(9)),
+            (Action::Window, PadBind::Controller(4)),
+            (Action::FullScreen, PadBind::Guide),
+        ]
+    );
+    assert_eq!(unresolved, Vec::<String>::new());
+}
+
+#[test]
+fn resolve_pad_binds_unresolved_named_is_dropped_and_reported() {
+    // A name no connected device reports fires nothing — the caller logs it.
+    let label_of = |_device: usize, _index: usize| None;
+    let triggers = vec![(Action::FullScreen, PadBind::Named("XboxX".to_owned()))];
+    let (resolved, unresolved) = resolve_pad_binds(&triggers, &[0], label_of);
+    assert_eq!(resolved, Vec::<(Action, PadBind)>::new());
+    assert_eq!(unresolved, vec!["XboxX".to_owned()]);
+}
+
+#[test]
+fn match_controller_ignores_unresolved_named_bind() {
+    // Named binds are resolved to Controller before matching; a leftover Named
+    // must never match a pressed index directly.
+    assert_eq!(
+        match_controller(
+            &[9],
+            &[(Action::FullScreen, PadBind::Named("XboxX".to_owned()))]
+        ),
+        None
+    );
 }

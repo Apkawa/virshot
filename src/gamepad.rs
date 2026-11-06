@@ -61,8 +61,10 @@
 //! any registration or pump starts, so nothing can emit into the erased
 //! reference afterwards. Callbacks must NOT re-emit into the library (`emit`
 //! holds the observer mutex), so this observer only reads the shared mailboxes,
-//! logs, and calls `capture::spawn_capture`; `gamepad::button_label` (which
-//! takes the registry lock) is called only from the GUI thread, never here.
+//! logs, and calls `capture::spawn_capture`; `gamepad::button_label` takes the
+//! registry lock, which is safe here because the library delivers
+//! `buttons_changed` AFTER releasing that lock (crate Observer doc), and the
+//! name→index scan runs in the same callback — never inside `emit`.
 //!
 //! Logging: `INFO` on device connect and disconnect (name + registry index —
 //! spec §4.1 connect/disconnect INFO; the library emits a disconnect once per
@@ -123,25 +125,36 @@ pub(crate) enum PadDownEvent {
     Share,
 }
 
-/// Config notation of a captured pad press (spec §4.1 / §9 raw notation). A
-/// controller press is `unknown:<N>`: the raw GameInput index is what the pump
-/// sees, and a canonical name is not derivable from it — the UI shows the
-/// device-info label hint beside it instead (§9 defers hardware verification of
-/// vendor-specific labels). System buttons keep their notation names.
-pub(crate) fn pad_notation(event: PadDownEvent) -> String {
+/// Config notation of a captured pad press (spec §4.1, Stage 5): the device-info
+/// label name when the device names the button (`XboxX`), the raw `unknown:<N>`
+/// fallback when it does not (v0 devices expose no labels, the Linux stub has no
+/// registry, §9), and the system-button notation names as-is. `label` is
+/// injected so the notation rule is unit-testable without GameInput.
+pub(crate) fn pad_notation_with_label(event: PadDownEvent, label: Option<&str>) -> String {
     match event {
-        PadDownEvent::Controller { index, .. } => format!("unknown:{index}"),
+        PadDownEvent::Controller { index, .. } => match label {
+            Some(label) if !label.is_empty() => label.to_owned(),
+            _ => format!("unknown:{index}"),
+        },
+        // System buttons have no device-info label slot (§9): the name IS the
+        // notation, whatever label a caller hands in.
         PadDownEvent::Guide => "Guide".to_owned(),
         PadDownEvent::Share => "Share".to_owned(),
     }
 }
 
-/// Label hint for a captured press (`gamepad::button_label` through the library, spec
-/// §9). `None` for system buttons, on Linux, and for unlabeled devices (v0
-/// carries no button labels, and a disconnected device has no entry to look up)
-/// — the UI then shows the raw notation alone. Called on the GUI thread; the
-/// library takes the registry lock, which is safe outside a callback.
-pub(crate) fn pad_button_label(event: PadDownEvent) -> Option<String> {
+/// [`pad_notation_with_label`] with the live device-info label looked up through
+/// the library — `None` off Windows, so the raw-index fallback stays. Safe on
+/// the GUI thread and in `buttons_changed` callbacks (the crate emits after
+/// releasing the registry lock).
+pub(crate) fn pad_notation(event: PadDownEvent) -> String {
+    pad_notation_with_label(event, pad_button_label(event).as_deref())
+}
+
+/// Live device-info label of a captured press (`gamepad::button_label`).
+/// `None` for system buttons, on Linux, and for unlabeled devices (v0 carries
+/// no button labels; a disconnected device has no entry to look up).
+fn pad_button_label(event: PadDownEvent) -> Option<String> {
     #[cfg(windows)]
     match event {
         // The library already returns an owned label (`Option<String>`).
@@ -244,20 +257,79 @@ pub(crate) fn commit_pad_capture(capture: &mut PadCapture, event: PadDownEvent) 
 
 /// Pad triggers derived from parsed controls, in config order (`full_screen` →
 /// `window` → `rect`): active actions that carry a `pad` bind. Keyboard-only
-/// bindings and the reserved `rect` action are absent.
+/// bindings and the reserved `rect` action are absent. `Named` binds come out
+/// unresolved — [`resolve_pad_binds`] turns them into `Controller` indices
+/// against the live devices before matching.
 pub(crate) fn pad_triggers(parsed: &[bindings::ActionBinding]) -> Vec<(Action, PadBind)> {
     parsed
         .iter()
         .filter(|binding| binding.active)
-        .filter_map(|binding| binding.pad.map(|pad| (binding.action, pad)))
+        // `binding` is borrowed from the parsed rows and the trigger list owns
+        // its binds (`Named` carries a String), so clone is the only move here.
+        .filter_map(|binding| binding.pad.clone().map(|pad| (binding.action, pad)))
         .collect()
+}
+
+/// Button indices the device-info label scan walks: controller state is a u64
+/// mask, so 0..64 — the same width the library clamps device button counts to
+/// (`MAX_BUTTON_COUNT` in `crates/gamepad/src/gameinput.rs`), and the same
+/// range [`newly_pressed`] reports.
+#[cfg(any(test, windows))]
+const PAD_BUTTON_INDEXES: usize = 64;
+
+/// Resolve a canonical GameInput button name to its controller bit index by
+/// scanning the device-info label tables of the connected devices. The mapping
+/// is device-dependent (§9 — the header has no static name→index route: the
+/// press PoC saw South at index 2 while `XboxA` is label 7), so device-info is
+/// the only truth. First device whose table carries the name wins; matching is
+/// case-insensitive. `label_of` is injected so the scan rule is unit-testable
+/// without GameInput; production passes `gamepad::button_label`.
+#[cfg(any(test, windows))]
+pub(crate) fn pad_index_for_name(
+    name: &str,
+    devices: &[usize],
+    label_of: impl Fn(usize, usize) -> Option<String>,
+) -> Option<u8> {
+    devices.iter().find_map(|device| {
+        (0..PAD_BUTTON_INDEXES).find_map(|index| {
+            label_of(*device, index)
+                .is_some_and(|label| label.eq_ignore_ascii_case(name))
+                .then_some(index as u8)
+        })
+    })
+}
+
+/// Resolve `Named` binds against the connected devices: resolved ones become
+/// `Controller(index)` (config order preserved), unresolved names are dropped
+/// and returned so the caller warns once per name — a name no device reports
+/// fires nothing rather than aborting the whole trigger list.
+#[cfg(any(test, windows))]
+pub(crate) fn resolve_pad_binds(
+    triggers: &[(Action, PadBind)],
+    devices: &[usize],
+    label_of: impl Fn(usize, usize) -> Option<String>,
+) -> (Vec<(Action, PadBind)>, Vec<String>) {
+    let mut resolved = Vec::with_capacity(triggers.len());
+    let mut unresolved = Vec::new();
+    for (action, bind) in triggers {
+        match bind {
+            PadBind::Named(name) => match pad_index_for_name(name, devices, &label_of) {
+                Some(index) => resolved.push((*action, PadBind::Controller(index))),
+                None => unresolved.push(name.clone()),
+            },
+            // The resolved list owns its binds; the input rows stay borrowed.
+            bind => resolved.push((*action, bind.clone())),
+        }
+    }
+    (resolved, unresolved)
 }
 
 /// Controller-button match: the action whose `Controller(index)` bind appears
 /// in `indices`. Callers pass the DOWN-edge indices ([`newly_pressed`]), not the
 /// library's currently-pressed list, so a held button cannot re-match. System
 /// binds (`Guide`/`Share`) never match controller indices: they arrive via
-/// `system_button`.
+/// `system_button`. A `Named` bind matches nothing directly — resolution is the
+/// only route from a name to an index, so an unresolved name never fires.
 #[cfg(any(test, windows))]
 pub(crate) fn match_controller(
     pressed_indices: &[u8],
@@ -265,7 +337,7 @@ pub(crate) fn match_controller(
 ) -> Option<Action> {
     triggers.iter().find_map(|(action, bind)| match bind {
         PadBind::Controller(index) => pressed_indices.contains(index).then_some(*action),
-        PadBind::Guide | PadBind::Share => None,
+        PadBind::Named(_) | PadBind::Guide | PadBind::Share => None,
     })
 }
 
@@ -380,6 +452,8 @@ pub(crate) fn spawn_pump(
         let observer = PadObserver {
             settings,
             previous: Mutex::new(HashMap::new()),
+            devices: Mutex::new(Vec::new()),
+            warned_named_binds: Mutex::new(Vec::new()),
             capture,
             gate,
             handoff,
@@ -426,6 +500,14 @@ struct PadObserver {
     /// ([`newly_pressed`]). Registry entries are never removed, so an index is
     /// stable; a disconnect drops the entry (a reconnect is a new index).
     previous: Mutex<HashMap<usize, u64>>,
+    /// Registry indices of the connected devices, for resolving `Named` binds
+    /// through device-info labels ([`resolve_pad_binds`]). `device_connected`
+    /// adds, `device_disconnected` removes: a disconnected entry exposes no
+    /// labels, so scanning it would be wasted work.
+    devices: Mutex<Vec<usize>>,
+    /// `Named` bind names already warned about — the trigger list re-parses per
+    /// event, so an unresolved name would otherwise WARN on every button press.
+    warned_named_binds: Mutex<Vec<String>>,
     /// Shared with the GUI: capture mode in, committed press out.
     capture: PadCaptureMailbox,
     /// Shared with the hotkey listener (spec §4.1 OR-fire, one gate).
@@ -445,6 +527,11 @@ impl gamepad::Observer for PadObserver {
             device.product_id,
             device.index,
         );
+        // Remember the registry index for `Named`-bind resolution. A poisoned
+        // registry skips the push — logging must not fail the callback.
+        if let Ok(mut devices) = self.devices.lock() {
+            devices.push(device.index);
+        }
     }
 
     fn buttons_changed(&self, device_index: usize, bits: u64, _pressed_indices: &[u8]) {
@@ -507,6 +594,13 @@ impl gamepad::Observer for PadObserver {
         if let Ok(mut previous) = self.previous.lock() {
             previous.remove(&index);
         }
+        // Drop the registry index too: `Named` binds must only resolve against
+        // connected devices (§9), so a gone device can no longer supply a
+        // label→index mapping. A poisoned registry skips the removal — logging
+        // must not fail the callback.
+        if let Ok(mut devices) = self.devices.lock() {
+            devices.retain(|device| *device != index);
+        }
     }
 
     fn heartbeat(&self, devices: usize, dispatches: u64) {
@@ -522,9 +616,53 @@ impl gamepad::Observer for PadObserver {
 impl PadObserver {
     /// Live pad triggers, re-parsed from the settings mailbox per event (cheap:
     /// three config rows) so a UI Apply or a captured bind fires without a
-    /// restart. An invalid config fires nothing for this event (logged).
+    /// restart. `Named` binds resolve to bit indices through the connected
+    /// devices' label tables ([`resolve_pad_binds`] — the name→index mapping is
+    /// device-dependent, §9); a name no device reports drops out and warns once
+    /// instead of aborting the whole trigger list. An invalid config fires
+    /// nothing for this event (logged).
     fn triggers_now(&self) -> Vec<(Action, PadBind)> {
-        pad_triggers_now(&self.settings).unwrap_or_default()
+        let Some(parsed) = pad_triggers_now(&self.settings) else {
+            return Vec::new();
+        };
+        let devices = self.connected_devices();
+        let (resolved, unresolved) = resolve_pad_binds(&parsed, &devices, |device, index| {
+            gamepad::button_label(device, index as u8)
+        });
+        for name in unresolved {
+            self.warn_unresolved_bind(&name);
+        }
+        resolved
+    }
+
+    /// Snapshot of the connected device indices. Clone, not a borrow: the label
+    /// scan calls `gamepad::button_label` (the library registry lock), and our
+    /// own mutex must not be held while taking it — one lock order, no deadlock.
+    fn connected_devices(&self) -> Vec<usize> {
+        self.devices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// WARN once per unresolved name (the trigger list re-parses every event):
+    /// a bind naming a button no connected device labels stays silent, but the
+    /// reason is visible in the log without spamming each button press.
+    fn warn_unresolved_bind(&self, name: &str) {
+        let mut warned = self
+            .warned_named_binds
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if warned
+            .iter()
+            .any(|warned| warned.eq_ignore_ascii_case(name))
+        {
+            return;
+        }
+        tracing::warn!(
+            "Pad bind \"{name}\" is not labeled by any connected device — its trigger stays silent"
+        );
+        warned.push(name.to_owned());
     }
 
     /// Previous mask of one device, then record the new one. A poisoned tracker

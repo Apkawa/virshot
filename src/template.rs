@@ -12,8 +12,28 @@
 use chrono::{DateTime, Local};
 
 /// Tokens recognized in a template, per spec §4.2/§7: `%Y %y %mo %d %H %M %S
-/// %iso %t %n %ext`. A `%` followed by anything else is a typed error.
-const TOKENS: &[&str] = &["Y", "y", "mo", "d", "H", "M", "S", "iso", "t", "n", "ext"];
+/// %iso %t %n %ext`. A `%` followed by anything else is a typed error. Each
+/// entry is `(token name without the `%`, one-line description)`: the name is
+/// what [`render`] validates and expands, the description is what the settings
+/// window shows in the placeholder reference (`gui::placeholder_reference_lines`),
+/// so the UI never keeps its own copy of the list. Descriptions state what the
+/// renderer actually produces (see [`token_value`]), nothing more.
+pub(crate) const TOKENS: &[(&str, &str)] = &[
+    ("Y", "4-digit year"),
+    ("y", "2-digit year"),
+    ("mo", "month, zero-padded (01-12)"),
+    ("d", "day of month, zero-padded"),
+    ("H", "hour, 24-hour clock, zero-padded"),
+    ("M", "minute, zero-padded"),
+    ("S", "second, zero-padded"),
+    ("iso", "local date and time, like 2026-11-03_00-12-05"),
+    (
+        "t",
+        "window title; \"fullscreen\" for full-screen shots, max 60 chars",
+    ),
+    ("n", "collision counter, normally 1"),
+    ("ext", "extension without dot, e.g. png"),
+];
 
 /// `%t` truncation limit (spec §4.2: "обрезка до ~60 символов").
 const TITLE_MAX_CHARS: usize = 60;
@@ -131,7 +151,7 @@ fn render_segment(
             .find(|c: char| !c.is_ascii_alphanumeric())
             .unwrap_or(after.len());
         let token = &after[..run];
-        if !TOKENS.contains(&token) {
+        if !TOKENS.iter().any(|(name, _)| *name == token) {
             return Err(Error::UnknownToken {
                 token: format!("%{token}"),
                 template: template.to_owned(),

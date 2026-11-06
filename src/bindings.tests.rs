@@ -115,15 +115,15 @@ fn parse_controls_invalid_pad_returns_unknown_pad_error() {
 fn parse_controls_invalid_pad_error_names_action_and_pad() {
     let controls = Controls {
         full_screen: Controls::default().full_screen,
-        window: binding("PrintScreen", &["Alt"], Some("Select")),
+        window: binding("PrintScreen", &["Alt"], Some("SouthEast")),
         rect: Controls::default().rect,
     };
 
-    let err = parse_controls(&controls).expect_err("gilrs-only names are out of notation");
+    let err = parse_controls(&controls).expect_err("names outside the notation must fail");
 
     assert_eq!(
         err.to_string(),
-        "unknown pad \"Select\" in binding [controls.window]"
+        "unknown pad \"SouthEast\" in binding [controls.window]"
     );
 }
 
@@ -137,7 +137,9 @@ fn parse_controls_missing_pad_field_is_none() {
 }
 
 #[test]
-fn parse_pad_canonical_names_map_to_gameinput_indices() {
+fn parse_pad_legacy_gilrs_names_keep_their_pinned_indices() {
+    // Pre-Stage-5 configs keep working: these names are the legacy gilrs-style
+    // vocabulary, pinned to fixed button indices (§9), not GameInput labels.
     assert_eq!(parse_pad("North"), Some(PadBind::Controller(0)));
     assert_eq!(parse_pad("East"), Some(PadBind::Controller(1)));
     assert_eq!(parse_pad("South"), Some(PadBind::Controller(2)));
@@ -189,13 +191,54 @@ fn parse_pad_system_buttons_return_guide_and_share() {
 }
 
 #[test]
+fn parse_pad_accepts_canonical_gameinput_names() {
+    // Stage 5 (§4.1): the captured device-info notation parses back. Names are
+    // canonical GameInput label names, matched case-insensitively; the config's
+    // own spelling is stored verbatim for display.
+    assert_eq!(parse_pad("XboxX"), Some(PadBind::Named("XboxX".to_owned())));
+    assert_eq!(
+        parse_pad("XboxLeftTrigger"),
+        Some(PadBind::Named("XboxLeftTrigger".to_owned()))
+    );
+    assert_eq!(
+        parse_pad("XboxDPadUp"),
+        Some(PadBind::Named("XboxDPadUp".to_owned()))
+    );
+    assert_eq!(
+        parse_pad("XboxPaddle1"),
+        Some(PadBind::Named("XboxPaddle1".to_owned()))
+    );
+    assert_eq!(parse_pad("xboxx"), Some(PadBind::Named("xboxx".to_owned())));
+    // Generic console labels a non-Xbox device-info may report.
+    assert_eq!(
+        parse_pad("Select"),
+        Some(PadBind::Named("Select".to_owned()))
+    );
+    assert_eq!(parse_pad("Home"), Some(PadBind::Named("Home".to_owned())));
+    assert_eq!(
+        parse_pad("PaddleRight2"),
+        Some(PadBind::Named("PaddleRight2".to_owned()))
+    );
+}
+
+#[test]
+fn parse_pad_still_accepts_unknown_index_and_gilrs_names() {
+    // Backwards compatibility (spec §9): raw-index notation and the legacy
+    // gilrs-style names keep parsing to fixed controller indices.
+    assert_eq!(parse_pad("unknown:7"), Some(PadBind::Controller(7)));
+    assert_eq!(parse_pad("South"), Some(PadBind::Controller(2)));
+    assert_eq!(parse_pad("RightStick"), Some(PadBind::Controller(11)));
+}
+
+#[test]
 fn parse_pad_invalid_names_return_none() {
+    // Names outside the GameInput label vocabulary (and typos of it) stay a
+    // visible config error: a silently dropped bind would fire nothing.
     assert_eq!(parse_pad("South "), None);
     assert_eq!(parse_pad("Joystick"), None);
-    assert_eq!(parse_pad("Select"), None);
-    assert_eq!(parse_pad("Start"), None);
+    assert_eq!(parse_pad("SouthEast"), None);
     assert_eq!(parse_pad("DPadUp"), None);
-    assert_eq!(parse_pad("Mode"), None);
+    assert_eq!(parse_pad("XboxXx"), None);
     assert_eq!(parse_pad("C"), None);
     assert_eq!(parse_pad("Z"), None);
     assert_eq!(parse_pad(""), None);
@@ -205,17 +248,19 @@ fn parse_pad_invalid_names_return_none() {
 fn parse_controls_unknown_key_returns_unknown_key_error() {
     let controls = Controls {
         full_screen: binding("PrintScreen", &[], None),
-        window: binding("F13", &["Alt"], None),
+        // `F25` is delivered by egui but has no Windows virtual key in
+        // `global_hotkey::key_to_vk`, so it is outside the notation.
+        window: binding("F25", &["Alt"], None),
         rect: Controls::default().rect,
     };
 
-    let err = parse_controls(&controls).expect_err("F13 is outside MVP notation");
+    let err = parse_controls(&controls).expect_err("F25 cannot be registered on Windows");
 
     assert_eq!(
         err,
         Error::UnknownKey {
             action: Action::Window,
-            key: "F13".to_owned(),
+            key: "F25".to_owned(),
         }
     );
 }
@@ -245,6 +290,20 @@ fn parse_key_printscreen_returns_printscreen_code() {
 }
 
 #[test]
+fn parse_key_accepts_the_bind_probe_keys_and_round_trips() {
+    // Stage 14: a Windows bind-probe press commits these names into a row, so
+    // every one must parse. `Code::to_string()` is what `gui` renders as the key
+    // name (`hotkeys::key_label`), so it must parse back to the same code.
+    assert_eq!(parse_key("ScrollLock"), Some(Code::ScrollLock));
+    assert_eq!(parse_key("scrolllock"), Some(Code::ScrollLock));
+    assert_eq!(parse_key("SCROLLLOCK"), Some(Code::ScrollLock));
+    assert_eq!(parse_key("Pause"), Some(Code::Pause));
+    for code in [Code::PrintScreen, Code::ScrollLock, Code::Pause] {
+        assert_eq!(parse_key(&code.to_string()), Some(code));
+    }
+}
+
+#[test]
 fn parse_key_single_letter_returns_letter_code() {
     assert_eq!(parse_key("A"), Some(Code::KeyA));
     assert_eq!(parse_key("s"), Some(Code::KeyS));
@@ -264,12 +323,228 @@ fn parse_key_function_key_returns_function_code() {
 }
 
 #[test]
+fn parse_key_accepts_navigation_and_function_keys() {
+    assert_eq!(parse_key("Insert"), Some(Code::Insert));
+    assert_eq!(parse_key("delete"), Some(Code::Delete));
+    assert_eq!(parse_key("HOME"), Some(Code::Home));
+    assert_eq!(parse_key("End"), Some(Code::End));
+    assert_eq!(parse_key("PageUp"), Some(Code::PageUp));
+    assert_eq!(parse_key("pagedown"), Some(Code::PageDown));
+    // The crate's Windows table stops at F24 (`key_to_vk`), F25 has no VK.
+    assert_eq!(parse_key("F13"), Some(Code::F13));
+    assert_eq!(parse_key("f20"), Some(Code::F20));
+    assert_eq!(parse_key("F24"), Some(Code::F24));
+    assert_eq!(parse_key("F25"), None);
+    assert_eq!(parse_key("F35"), None);
+    assert_eq!(parse_key("F0"), None);
+}
+
+#[test]
+fn parse_key_accepts_whitespace_and_enter() {
+    assert_eq!(parse_key("Space"), Some(Code::Space));
+    assert_eq!(parse_key("space"), Some(Code::Space));
+    assert_eq!(parse_key("Enter"), Some(Code::Enter));
+    assert_eq!(parse_key("Tab"), Some(Code::Tab));
+    assert_eq!(parse_key("ContextMenu"), Some(Code::ContextMenu));
+    assert_eq!(parse_key("Menu"), Some(Code::ContextMenu));
+    assert_eq!(parse_key("Pause"), Some(Code::Pause));
+    assert_eq!(parse_key("Help"), Some(Code::Help));
+    assert_eq!(parse_key("Sleep"), Some(Code::Sleep));
+}
+
+#[test]
+fn parse_key_arrow_names_are_canonical_and_aliasable() {
+    assert_eq!(parse_key("ArrowDown"), Some(Code::ArrowDown));
+    assert_eq!(parse_key("arrowleft"), Some(Code::ArrowLeft));
+    assert_eq!(parse_key("ArrowRight"), Some(Code::ArrowRight));
+    assert_eq!(parse_key("ARROWUP"), Some(Code::ArrowUp));
+    // egui's short names are convenience aliases, canonical is `Arrow*`.
+    assert_eq!(parse_key("Down"), Some(Code::ArrowDown));
+    assert_eq!(parse_key("left"), Some(Code::ArrowLeft));
+    assert_eq!(parse_key("Right"), Some(Code::ArrowRight));
+    assert_eq!(parse_key("Up"), Some(Code::ArrowUp));
+    assert_eq!(parse_key("Arrow"), None);
+}
+
+#[test]
+fn parse_key_accepts_punctuation_names() {
+    assert_eq!(parse_key("Comma"), Some(Code::Comma));
+    assert_eq!(parse_key("Period"), Some(Code::Period));
+    assert_eq!(parse_key("Minus"), Some(Code::Minus));
+    assert_eq!(parse_key("Equal"), Some(Code::Equal));
+    assert_eq!(parse_key("Semicolon"), Some(Code::Semicolon));
+    assert_eq!(parse_key("Slash"), Some(Code::Slash));
+    assert_eq!(parse_key("Backslash"), Some(Code::Backslash));
+    assert_eq!(parse_key("Quote"), Some(Code::Quote));
+    assert_eq!(parse_key("Backquote"), Some(Code::Backquote));
+    assert_eq!(parse_key("BracketLeft"), Some(Code::BracketLeft));
+    assert_eq!(parse_key("BracketRight"), Some(Code::BracketRight));
+    assert_eq!(parse_key("IntlBackslash"), Some(Code::IntlBackslash));
+    assert_eq!(parse_key("IntlRo"), Some(Code::IntlRo));
+    assert_eq!(parse_key("IntlYen"), Some(Code::IntlYen));
+    // Crate-style spellings of the legacy single-letter/digit notation.
+    assert_eq!(parse_key("KeyA"), Some(Code::KeyA));
+    assert_eq!(parse_key("keyz"), Some(Code::KeyZ));
+    assert_eq!(parse_key("Digit7"), Some(Code::Digit7));
+    assert_eq!(parse_key("digit0"), Some(Code::Digit0));
+    // Parsing is case-insensitive, so `Keys` is the canonical `KeyS`
+    // spelling; a multi-character remainder is not a key name.
+    assert_eq!(parse_key("Keys"), Some(Code::KeyS));
+    assert_eq!(parse_key("KeyAB"), None);
+    assert_eq!(parse_key("Digits"), None);
+    assert_eq!(parse_key("DigitX"), None);
+}
+
+#[test]
+fn parse_key_accepts_media_browser_and_numpad_names() {
+    assert_eq!(parse_key("BrowserHome"), Some(Code::BrowserHome));
+    assert_eq!(parse_key("browserSearch"), Some(Code::BrowserSearch));
+    assert_eq!(parse_key("AudioVolumeMute"), Some(Code::AudioVolumeMute));
+    assert_eq!(parse_key("AudioVolumeDown"), Some(Code::AudioVolumeDown));
+    assert_eq!(parse_key("AudioVolumeUp"), Some(Code::AudioVolumeUp));
+    assert_eq!(parse_key("MediaPlayPause"), Some(Code::MediaPlayPause));
+    assert_eq!(parse_key("MediaTrackNext"), Some(Code::MediaTrackNext));
+    assert_eq!(
+        parse_key("MediaTrackPrevious"),
+        Some(Code::MediaTrackPrevious)
+    );
+    assert_eq!(parse_key("MediaStop"), Some(Code::MediaStop));
+    // Bindable, but egui never delivers them — config-only notation.
+    assert_eq!(parse_key("MediaPlay"), Some(Code::MediaPlay));
+    assert_eq!(parse_key("MediaPause"), Some(Code::MediaPause));
+    assert_eq!(parse_key("MediaSelect"), Some(Code::MediaSelect));
+    assert_eq!(parse_key("LaunchMail"), Some(Code::LaunchMail));
+    assert_eq!(parse_key("LaunchApp1"), Some(Code::LaunchApp1));
+    assert_eq!(parse_key("LaunchApp2"), Some(Code::LaunchApp2));
+    assert_eq!(parse_key("Convert"), Some(Code::Convert));
+    assert_eq!(parse_key("KanaMode"), Some(Code::KanaMode));
+    assert_eq!(parse_key("NonConvert"), Some(Code::NonConvert));
+    assert_eq!(parse_key("Numpad5"), Some(Code::Numpad5));
+    assert_eq!(parse_key("NumpadEnter"), Some(Code::NumpadEnter));
+    assert_eq!(parse_key("numpadadd"), Some(Code::NumpadAdd));
+    assert_eq!(parse_key("NumpadSubtract"), Some(Code::NumpadSubtract));
+    assert_eq!(parse_key("NumpadMultiply"), Some(Code::NumpadMultiply));
+    assert_eq!(parse_key("NumpadDivide"), Some(Code::NumpadDivide));
+    assert_eq!(parse_key("NumpadDecimal"), Some(Code::NumpadDecimal));
+    assert_eq!(parse_key("NumpadComma"), Some(Code::NumpadComma));
+    assert_eq!(parse_key("NumpadEqual"), Some(Code::NumpadEqual));
+    assert_eq!(parse_key("NumpadClear"), Some(Code::NumpadClear));
+    assert_eq!(parse_key("Numpad"), None);
+    // Codes the Windows table does not map.
+    assert_eq!(parse_key("MediaRecord"), None);
+    assert_eq!(parse_key("MediaRewind"), None);
+    assert_eq!(parse_key("NumpadBackspace"), None);
+}
+
+#[test]
+fn parse_key_rejects_reserved_escape_and_backspace() {
+    assert_eq!(parse_key("Escape"), None);
+    assert_eq!(parse_key("esc"), None);
+    assert_eq!(parse_key("ESCAPE"), None);
+    assert_eq!(parse_key("Backspace"), None);
+    assert_eq!(parse_key("backspace"), None);
+}
+
+#[test]
+fn parse_key_rejects_modifiers_lock_keys_and_unmappable_names() {
+    // Modifier keys cannot be the main key of a Windows hotkey (`key_to_vk`
+    // has no arm for them); `CapsLock`/`NumLock` are excluded on purpose.
+    // `ScrollLock` is NOT excluded (Stage 14): it is a bind-probe key, and a
+    // binding naming it must parse so the committed row is registrable.
+    assert_eq!(parse_key("ShiftLeft"), None);
+    assert_eq!(parse_key("ShiftRight"), None);
+    assert_eq!(parse_key("ControlLeft"), None);
+    assert_eq!(parse_key("AltRight"), None);
+    assert_eq!(parse_key("Meta"), None);
+    assert_eq!(parse_key("SuperLeft"), None);
+    assert_eq!(parse_key("CapsLock"), None);
+    assert_eq!(parse_key("NumLock"), None);
+    assert_eq!(parse_key("Fn"), None);
+    assert_eq!(parse_key("FnLock"), None);
+    assert_eq!(parse_key("Eject"), None);
+    assert_eq!(parse_key("Power"), None);
+    assert_eq!(parse_key("Clear"), None);
+    assert_eq!(parse_key("Copy"), None);
+    assert_eq!(parse_key("Cut"), None);
+    assert_eq!(parse_key("Paste"), None);
+    // Shift-modified characters have no physical code to register.
+    assert_eq!(parse_key("Colon"), None);
+    assert_eq!(parse_key("Pipe"), None);
+    assert_eq!(parse_key("Questionmark"), None);
+    assert_eq!(parse_key("Exclamationmark"), None);
+    assert_eq!(parse_key("OpenCurlyBracket"), None);
+    assert_eq!(parse_key("CloseCurlyBracket"), None);
+    assert_eq!(parse_key("Plus"), None);
+    assert_eq!(parse_key("OpenBracket"), None);
+    assert_eq!(parse_key("Backtick"), None);
+    assert_eq!(parse_key("Equals"), None);
+}
+
+#[test]
+fn reserved_key_name_escape_and_backspace_are_canonical() {
+    assert_eq!(reserved_key_name("Escape"), Some("Escape"));
+    assert_eq!(reserved_key_name("esc"), Some("Escape"));
+    assert_eq!(reserved_key_name("BACKSPACE"), Some("Backspace"));
+    assert_eq!(reserved_key_name(""), None);
+    assert_eq!(reserved_key_name("PrintScreen"), None);
+}
+
+#[test]
+fn parse_controls_reserved_key_error_names_action_and_key() {
+    let controls = Controls {
+        full_screen: binding("PrintScreen", &[], None),
+        window: binding("Esc", &["Ctrl"], None),
+        rect: Controls::default().rect,
+    };
+
+    let err = parse_controls(&controls).expect_err("Escape is reserved for the capture UI");
+
+    assert_eq!(
+        err,
+        Error::ReservedKey {
+            action: Action::Window,
+            key: "Esc".to_owned(),
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "reserved key \"Esc\" in binding [controls.window]: \
+         Escape cancels capture, Backspace clears a binding"
+    );
+}
+
+#[test]
+fn parse_controls_backspace_reserved_error_reports_the_rect_action() {
+    let controls = Controls {
+        full_screen: Controls::default().full_screen,
+        window: Controls::default().window,
+        rect: binding("Backspace", &[], None),
+    };
+
+    let err = parse_controls(&controls).expect_err("Backspace is reserved for the capture UI");
+
+    assert_eq!(
+        err,
+        Error::ReservedKey {
+            action: Action::Rect,
+            key: "Backspace".to_owned(),
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "reserved key \"Backspace\" in binding [controls.rect]: \
+         Escape cancels capture, Backspace clears a binding"
+    );
+}
+
+#[test]
 fn parse_key_unsupported_names_return_none() {
-    assert_eq!(parse_key("Pause"), None);
-    assert_eq!(parse_key("F13"), None);
+    assert_eq!(parse_key("F25"), None);
     assert_eq!(parse_key("AB"), None);
     assert_eq!(parse_key(""), None);
-    assert_eq!(parse_key("Space"), None);
+    assert_eq!(parse_key("Hyper"), None);
+    assert_eq!(parse_key("NumpadHash"), None);
+    assert_eq!(parse_key("Space "), None);
 }
 
 #[test]
@@ -366,4 +641,18 @@ fn debounce_custom_interval_blocks_within_custom_interval() {
     assert!(debounce.try_fire(Action::Window, at_ms(0)));
     assert!(!debounce.try_fire(Action::Window, at_ms(500)));
     assert!(debounce.try_fire(Action::Window, at_ms(600)));
+}
+
+#[cfg(windows)]
+#[test]
+fn canonical_pad_names_match_the_gamepad_label_table() {
+    // The notation vocabulary mirrors `button_name` in crates/gamepad (the
+    // vendored GameInput header): every name the UI can write must parse back.
+    // Guide/Share are system binds, not controller labels, so they are excluded.
+    let mut expected: Vec<&str> = (1..=124).filter_map(gamepad::button_name).collect();
+    expected.retain(|name| *name != "Guide" && *name != "Share");
+    let mut mirrored = GAMEPAD_CANONICAL_NAMES.to_vec();
+    expected.sort_unstable();
+    mirrored.sort_unstable();
+    assert_eq!(mirrored, expected);
 }

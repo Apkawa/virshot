@@ -316,9 +316,11 @@ if [ "${UIVERIFY_INNER:-}" = 1 ]; then
       sleep 0.5
     done
     kill -0 "$APP" 2>/dev/null && fail "app still alive after menu Exit" || pass "app exited on menu Exit (id=$id_exit)"
-    grep -q 'virshot exiting from tray menu' "$LOG" \
-      && { note "$(grep -m1 'virshot exiting from tray menu' "$LOG")"; pass "log: virshot exiting from tray menu"; } \
-      || fail "log: 'virshot exiting from tray menu' missing"
+    # Two shutdown paths log this: main.rs ("virshot exiting from tray menu") and
+    # the resident GUI tray handler ("virshot exiting: tray menu"); accept either.
+    grep -E -q 'virshot exiting( from tray menu|: tray menu)' "$LOG" \
+      && { note "$(grep -E -m1 'virshot exiting( from tray menu|: tray menu)' "$LOG")"; pass "log: virshot exiting via tray menu"; } \
+      || fail "log: 'virshot exiting' via tray menu missing"
     [ -e "$CFG.lock" ] && fail "instance lock still present after menu Exit" || pass "instance lock removed on clean exit"
     APP=""
   }

@@ -1,6 +1,8 @@
 use super::Error;
+use super::TOKENS;
 use super::collision_variant;
 use super::render;
+use super::token_value;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 
 /// Fixed injected instant: 2026-11-03 00:12:05 local — the spec §4.2
@@ -258,6 +260,65 @@ fn error_messages_quote_template_for_toast_and_log() {
     assert!(parent.to_string().contains("../%iso.%ext"));
     assert!(unknown.to_string().contains("%month"));
     assert!(unknown.to_string().contains("%month.%ext"));
+}
+
+// ---------- token table ↔ renderer agreement ----------
+
+/// Plausible lookalikes that must NOT be recognized (spec §4.2: only the 11
+/// exact spellings; no `%m`, `%month`, `%app`, `%f`). These are probes, not a
+/// copy of the table — the recognized set comes from `TOKENS` itself.
+const REJECTED_TOKEN_PROBES: &[&str] = &[
+    "", "m", "month", "app", "f", "E", "h", "s", "yy", "mS", "percent",
+];
+
+/// The display table is exactly what the renderer supports: every entry
+/// renders through `render` to a value (never its own name), and every probed
+/// name outside the table is rejected by `render` and echoed verbatim by
+/// `token_value`. Both directions go through the module's own code paths, so
+/// the table cannot drift away from the renderer (the UI list is derived from
+/// it, so this pins the accordion too).
+#[test]
+fn token_table_lists_every_placeholder_the_renderer_supports() {
+    let now = fixed_now();
+    let title = Some("Cyberpunk 2077");
+
+    for (name, description) in TOKENS {
+        assert!(
+            !description.is_empty(),
+            "token \"{name}\" must carry a description for the UI reference"
+        );
+        let path = render(&format!("%{name}.%ext"), now, title, "png", 1).unwrap();
+        assert!(
+            path.ends_with(".png"),
+            "token \"{name}\" must render inside a segment, got {path}"
+        );
+        assert_ne!(
+            token_value(name, now, title, "png", 1),
+            *name,
+            "token \"{name}\" must expand to a value, not echo its name"
+        );
+    }
+
+    for probe in REJECTED_TOKEN_PROBES {
+        assert!(
+            !TOKENS.iter().any(|(name, _)| name == probe),
+            "probe \"{probe}\" must stay outside the table"
+        );
+        let template = format!("%{probe}.%ext");
+        let err = render(&template, now, title, "png", 1).unwrap_err();
+        assert!(
+            matches!(&err, Error::UnknownToken { token, .. } if *token == format!("%{probe}")),
+            "expected UnknownToken for \"{probe}\", got {err:?}"
+        );
+        assert_eq!(
+            token_value(probe, now, title, "png", 1),
+            *probe,
+            "unlisted token must hit the echo fallback in token_value"
+        );
+    }
+
+    // Spec §4.2 pins the exact count: `%Y %y %mo %d %H %M %S %iso %t %n %ext`.
+    assert_eq!(TOKENS.len(), 11, "token table must list spec §4.2 tokens");
 }
 
 // ---------- collision variants ----------

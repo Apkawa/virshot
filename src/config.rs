@@ -436,13 +436,17 @@ pub(crate) struct Binding {
     pub(crate) key: String,
     pub(crate) mods: Vec<String>,
     /// Gamepad trigger, pad notation (parsed by `bindings::parse_pad`,
-    /// case-insensitive): a canonical GameInput controller button name —
-    /// `"North"`, `"East"`, `"South"`, `"West"`, `"LeftShoulder"`,
-    /// `"RightShoulder"`, `"LeftTrigger"`, `"RightTrigger"`,
-    /// `"RightThumbstick"`, `"LeftThumbstick"`, `"LeftStick"`, `"RightStick"` —
-    /// `unknown:<N>` for a raw controller button index (`N` decimal 0..=63),
-    /// or a system button: `"Guide"`, `"Share"`. `None` means no gamepad
-    /// trigger; any other value is a config error
+    /// case-insensitive): a canonical GameInput button name — the device-info
+    /// label the capture UI writes, e.g. `"XboxX"`, `"XboxLeftTrigger"`,
+    /// `"XboxDPadUp"`, `"Select"` (the full table mirrors
+    /// `gamepad::button_name`; see `bindings::GAMEPAD_CANONICAL_NAMES`); its
+    /// controller button index resolves from device-info at runtime, so the
+    /// same name may be a different button on different pads — §9. Legacy
+    /// gilrs-style names (`"South"`, `"North"`, `"LeftShoulder"`, …) pin fixed
+    /// indices for pre-Stage-5 configs. `unknown:<N>` for a raw controller
+    /// button index (`N` decimal 0..=63, the capture fallback on an unlabeled
+    /// device), or a system button: `"Guide"`, `"Share"`. `None` means no
+    /// gamepad trigger; any other value is a config error
     /// (`bindings::Error::UnknownPad`).
     pub(crate) pad: Option<String>,
 }
