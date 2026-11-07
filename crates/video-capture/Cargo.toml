@@ -1,0 +1,31 @@
+[package]
+name = "video-capture"
+version = "0.1.0"
+edition = "2024"
+
+# Isolated Windows screen-recording crate over `windows-capture` (video-capture
+# plan Stage 1: skeleton + platform-independent logic; the engine lands in
+# Stage 2). Dependency versions are the ones already locked in Cargo.lock — the
+# only new crates.io entry is `windows-capture`, approved by the user.
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+thiserror = "2"
+tracing = "0.1.44"
+
+# Windows-only backend: on Linux the dependency is not pulled at all, so the
+# Linux gate never compiles it (same shape as `gamepad` in the root manifest).
+[target."cfg(windows)".dependencies]
+windows-capture = "2.0.1"
+
+# egui test example (`examples/capture_demo.rs`, plan Stage 3): the exact
+# versions/features the root manifest pins, so these dev-deps add no new
+# crates.io entry — every one is already locked in Cargo.lock. `x11`/`wayland`
+# mirror the root rationale: the unix dev host needs a winit platform backend to
+# compile eframe, and both are unix-only deps, so the Windows build never pulls
+# them. Dev-scope only: the library itself stays free of UI dependencies.
+# `tracing` is not repeated here — the regular dependency already gives the
+# example its macros.
+[dev-dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+egui = "0.37.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

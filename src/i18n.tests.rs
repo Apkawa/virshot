@@ -270,10 +270,10 @@ fn catalog_entries(text: &str) -> Vec<(String, Vec<(String, String)>)> {
         if line.starts_with(' ') || line.starts_with('\t') {
             // Nested locale line; locale names never contain ':', so the
             // first split is the locale, the rest is the raw value.
-            if let Some((locale, raw)) = line.trim_start().split_once(':') {
-                if let Some(entry) = current.as_mut() {
-                    entry.1.push((locale.to_owned(), raw.trim().to_owned()));
-                }
+            if let Some((locale, raw)) = line.trim_start().split_once(':')
+                && let Some(entry) = current.as_mut()
+            {
+                entry.1.push((locale.to_owned(), raw.trim().to_owned()));
             }
             continue;
         }

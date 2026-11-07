@@ -10,7 +10,7 @@ edition = "2024"
 # the Windows-only GameInput shim and the historical PoC are never compiled by
 # the Linux gate.
 [workspace]
-members = [".", "crates/overlay", "crates/toast", "crates/gamepad", "crates/icons"]
+members = [".", "crates/overlay", "crates/toast", "crates/gamepad", "crates/icons", "crates/video-capture"]
 exclude = [ "hidpad-poc"]
 
 [dependencies]
