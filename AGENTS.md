@@ -195,6 +195,15 @@ Placement follows the **visibility of the code under test**, never convenience.
 - **Error types:** `thiserror` (per-module error enums; typed errors over stringly `Err(String)`).
 - **Logging:** `tracing` + `tracing-subscriber` (file appender).
 - **CLI:** `clap`.
+- **Release tooling:** `git-cliff` is a dev **tool** (installed binary via
+  `cargo install`), **not a crate dependency** — nothing in `Cargo.toml` or
+  `Cargo.lock` references it. Pinned **2.14.2**, approved by the user:
+  `./cargo.sh install git-cliff --version 2.14.2 --no-default-features` (sandbox
+  `CARGO_HOME=./.cache/cargo`, binary `./.cache/cargo/bin/git-cliff`;
+  `--no-default-features` drops the update-informer/forge notifier, the core CLI
+  is intact). It drives `CHANGELOG.md` generation and the ZeroVer version bump +
+  git tag through `scripts/release.sh` (`changelog`, `minor`, `patch`; `major`
+  is forbidden — ZeroVer).
 
 Keep the dependency set minimal: add crates only when an MVP feature requires it,
 and pin the backend/features a crate needs. Native build deps: Windows-gnu needs
