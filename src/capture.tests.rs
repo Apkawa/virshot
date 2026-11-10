@@ -304,7 +304,10 @@ fn save_image_png_creates_missing_subfolders_and_writes_decodable_file() {
 
 #[test]
 fn save_image_parent_is_regular_file_returns_io_error() {
-    let file = PathBuf::from("./.tmp/capture_save_parent_regular_file.png");
+    // ScratchDir creates `./.tmp/` itself: a CI checkout has no `./.tmp/`, so a
+    // bare `./.tmp/...` path would fail with NotFound before the assertion runs.
+    let dir = ScratchDir::new("save-parent-file");
+    let file = dir.path.join("capture_save_parent_regular_file.png");
     std::fs::write(&file, b"not a directory").expect("scratch file must be writable");
     let err = save_image(
         &synthetic_image(2, 2),
@@ -316,7 +319,6 @@ fn save_image_parent_is_regular_file_returns_io_error() {
         matches!(&err, Error::Io { path, .. } if *path == file),
         "expected Error::Io attributed to the parent, got {err:?}"
     );
-    std::fs::remove_file(&file).expect("scratch file must be removable");
 }
 
 // ---------- typed errors ----------

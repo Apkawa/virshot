@@ -991,7 +991,17 @@ mod tests {
         assert_eq!(builder.position, Some(egui::pos2(0.0, 0.0)));
         assert_eq!(builder.transparent, Some(true));
         assert_eq!(builder.decorations, Some(false));
-        assert_eq!(builder.mouse_passthrough, Some(true));
+        // The builder rule is `spec.click_through && !cfg!(windows)`
+        // (host.rs:346-354): egui-winit's `set_cursor_hittest(false)` makes
+        // winit add `WS_EX_TRANSPARENT | WS_EX_LAYERED` without ever
+        // attributing the layered window, so passthrough is dropped on
+        // Windows to keep the chip compositing at all. `spec_at` sets
+        // `click_through: true`, so the builder value is `!cfg!(windows)`.
+        assert_eq!(
+            builder.mouse_passthrough,
+            Some(!cfg!(windows)),
+            "passthrough must match the builder rule at host.rs:346-354"
+        );
         assert_eq!(builder.window_level, Some(egui::WindowLevel::AlwaysOnTop));
         assert_eq!(
             builder.visible,
