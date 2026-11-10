@@ -29,3 +29,9 @@
 ## CI
 
 - [ ] cargo-audit в CI (security advisories) — опционально.
+- [ ] сборка `aarch64-pc-windows-msvc` (`win-arm64`) + проверка запуска на ARM64 — выведено
+  из scope задачи `2026-11-09_github-ci` (решение пользователя 2026-11-09, «когда надо будет
+  арм сборка тогда и сделаем»): матрица `release.yml` расширяется третьим target'ом без смены
+  схемы имён (`virshot-v<version>-win-arm64.zip`); feasibility —
+  `.dumbspec/archive/2026-11-09_github-ci/research.md` §12 (runner `windows-11-arm`, known
+  miscompile rustc 1.99.1 на этом target'е — rust-lang/rust#165346; cross-сборка из Linux не поддержана)

@@ -105,6 +105,27 @@ Placement follows the **visibility of the code under test**, never convenience.
 - In this sandbox, cargo caches must stay in the repo. Use the wrapper `./cargo.sh`
   (sets `CARGO_HOME=./.cache/cargo` and forwards all args to cargo); global
   `~/.cargo` is read-only, so bare `cargo` fails in the sandbox.
+- **CI gates (GitHub Actions):** `ci.yml` runs on `push` to `master`,
+  `pull_request`, `workflow_dispatch` — Linux job installs the apt native dev
+  packages (incl. `libgbm-dev` for xcap), then fmt-check / workspace check /
+  workspace test / clippy `-D warnings`; Windows job runs workspace test +
+  clippy `-D warnings`, no extra packages. CI runs plain `cargo` (the sandbox
+  wrapper is local-only).
+- **Release delivery (GitHub Actions):** `release.yml` runs on tag `v*`, `push`
+  to `master`, `workflow_dispatch`: builds `x86_64-pc-windows-msvc` +
+  `x86_64-unknown-linux-gnu`, uploads artifacts `binary-win-x64` /
+  `binary-linux-x64`, packs with `scripts/package-release.sh --binaries DIR
+  --version VER --kind release|nightly [--sha SHORTSHA] --repo OWNER/REPO
+  --tag TAG [--out DIR]` (needs `zip`, `tar`, `openssl`; archives hold the bare
+  binary only) and publishes via `gh` with `contents: write`. Naming: release
+  tag `v<version>` → `virshot-v<version>-win-x64.zip` /
+  `virshot-v<version>-linux-x64.tar.gz`; rolling prerelease tag `nightly`
+  (built from any `master` commit) → `virshot-v<version>-nightly-<shortsha>-…`,
+  updated in place (old assets removed, target commit moved). `release.yaml`
+  ships next to the archives: `version`, `releaseDate` (ISO-8601 ms + `Z`),
+  short `commit_sha`, `files[] {url, type, sha512 (base64 of the raw digest),
+  size}`. ARM64 (`aarch64-pc-windows-msvc` / `win-arm64`) is **deferred** — out
+  of scope here, a separate future task.
 - Temporary/scratch artifacts (screenshots, harnesses, logs) go only in `./.tmp/`;
   caches only in `./.cache/`; both are git-ignored, along with `target/`.
 - **Thread model:** exactly one winit `EventLoop` per process (winit 0.30 global
@@ -203,7 +224,13 @@ Placement follows the **visibility of the code under test**, never convenience.
   `--no-default-features` drops the update-informer/forge notifier, the core CLI
   is intact). It drives `CHANGELOG.md` generation and the ZeroVer version bump +
   git tag through `scripts/release.sh` (`changelog`, `minor`, `patch`; `major`
-  is forbidden — ZeroVer).
+  is forbidden — ZeroVer). CI installs the same pinned tool in the release
+  `package` job (`cargo install git-cliff --version 2.14.2
+  --no-default-features`) and uses it for the release body — `git-cliff --latest`
+  for tag releases, `git-cliff --unreleased` for nightly; **still no crate dep**,
+  nothing in `Cargo.toml`/`Cargo.lock` references it. `scripts/release.sh` only
+  creates the commit + annotated tag locally; pushing and publishing happen via
+  GitHub Actions (see Build & environment), never from the script.
 
 Keep the dependency set minimal: add crates only when an MVP feature requires it,
 and pin the backend/features a crate needs. Native build deps: Windows-gnu needs

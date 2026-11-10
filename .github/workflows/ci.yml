@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  linux:
+    name: Linux x86_64 — fmt / check / test / clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dev packages (xcap / eframe GL chain)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libegl1-mesa-dev libgbm-dev libudev-dev \
+            libwayland-dev libpipewire-0.3-dev libclang-dev
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+      - name: Run workspace tests
+        run: cargo test --workspace
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  windows:
+    name: Windows — test / clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run workspace tests
+        run: cargo test --workspace
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings

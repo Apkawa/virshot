@@ -7,9 +7,20 @@
 
 ## Запуск на Windows
 
-Поставка — `virshot.exe` прямо из билда
-(`target/x86_64-pc-windows-gnu/release/virshot.exe`); zip-архив не делается,
-запуск из папки билда. Двойной клик по exe не открывает чёрного окна консоли
+Поставка — GitHub Releases: релизы тега `v*` с архивами
+`virshot-v<version>-win-x64.zip` (`virshot.exe`, сборка
+`x86_64-pc-windows-msvc`) и `virshot-v<version>-linux-x64.tar.gz` (`virshot`,
+`x86_64-unknown-linux-gnu`) плюс `release.yaml` — список файлов с полным
+download URL, `sha512` (base64) и размером. rolling prerelease `nightly`
+собирается с любого коммита `master` и обновляется на месте:
+`virshot-v<version>-nightly-<shortsha>-win-x64.zip` /
+`virshot-v<version>-nightly-<shortsha>-linux-x64.tar.gz` (старые ассеты
+удалены, target-коммит перенесён). Архивы содержат только бинарь, без
+инсталлера.
+
+Dev-путь — exe прямо из билда
+(`target/x86_64-pc-windows-gnu/release/virshot.exe`, gnu-кросс-билд), запуск
+из папки билда. Двойной клик по exe не открывает чёрного окна консоли
 (PE subsystem `WINDOWS`) — запуск молча, процесс уходит в трей. CLI
 `virshot shot` пишет stdout только при запуске из уже открытой консоли
 (cmd/PowerShell).
