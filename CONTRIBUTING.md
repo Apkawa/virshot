@@ -69,7 +69,11 @@ Triggers: `push` to `master`, `pull_request`, `workflow_dispatch`.
 ### `release.yml`
 
 Triggers: tag push `v*`, `push` to `master`, `workflow_dispatch`; the job
-publishes with `contents: write`.
+publishes with `contents: write`. The runner hands `GITHUB_TOKEN` only as a
+secret, so the workflow exports `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` in
+`env:` for `gh`. The release commit is pinned with
+`gh release create/edit --target <full SHA>` (there is no `--target-commit`
+flag).
 
 - **`build`** matrix: `x86_64-pc-windows-msvc` on `windows-latest` and
   `x86_64-unknown-linux-gnu` on `ubuntu-latest` (Linux installs the native dev

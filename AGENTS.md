@@ -34,6 +34,9 @@ Product requirements: `docs/spec.md`. Task process artifacts: `.dumbspec/`.
   `./cargo.sh test --test e2e`.
 - **Commit messages follow Conventional Commits** (`type(scope): description`,
   e.g. `feat(poc): ...`). No linter enforces this yet — keep it by convention.
+  **Workflow/CI changes use the bare `ci:` type** (no scope): fixes to
+  `.github/workflows/*` and CI-only test adjustments are `ci: ...`, not
+  `fix(ci): ...`.
 
 ## Testing
 
@@ -117,7 +120,11 @@ Placement follows the **visibility of the code under test**, never convenience.
   `binary-linux-x64`, packs with `scripts/package-release.sh --binaries DIR
   --version VER --kind release|nightly [--sha SHORTSHA] --repo OWNER/REPO
   --tag TAG [--out DIR]` (needs `zip`, `tar`, `openssl`; archives hold the bare
-  binary only) and publishes via `gh` with `contents: write`. Naming: release
+  binary only) and publishes via `gh` with `contents: write`: the workflow
+  exports `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` in `env:` (the runner exposes
+  the token only as a secret, so `gh` fails without it) and pins the release
+  commit with `gh release create/edit --target <full SHA>` — there is no
+  `--target-commit` flag. Naming: release
   tag `v<version>` → `virshot-v<version>-win-x64.zip` /
   `virshot-v<version>-linux-x64.tar.gz`; rolling prerelease tag `nightly`
   (built from any `master` commit) → `virshot-v<version>-nightly-<shortsha>-…`,

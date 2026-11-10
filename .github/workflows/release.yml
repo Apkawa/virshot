@@ -16,6 +16,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The runner only exposes GITHUB_TOKEN as a secret; `gh` needs it in the
+  # environment to publish releases with this workflow's `contents: write`.
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   build:
