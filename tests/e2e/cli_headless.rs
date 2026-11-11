@@ -74,6 +74,29 @@ fn cli_version_flag_exits_zero_and_prints_version() {
         text.contains(env!("CARGO_PKG_VERSION")),
         "version line must carry the package version: {text}"
     );
+    // Extended build-metadata contract (task 2026-11-10_about-dialog): the
+    // line is `virshot <version> (<sha>) built <build_time>`. Checked by plain
+    // containment, no regex dependency.
+    assert!(
+        text.contains("built "),
+        "version line must carry the build marker: {text}"
+    );
+    assert!(
+        text.contains("+03:00"),
+        "build time must use the Moscow ISO-8601 offset: {text}"
+    );
+    // Regex-free check of the parenthesised sha token: the text between the
+    // first '(' and the following ')' must be a non-empty token (sha or
+    // `unknown`).
+    let sha_token = text
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(inner, _)| inner)
+        .expect("version line must contain a parenthesised sha token");
+    assert!(
+        !sha_token.is_empty(),
+        "the parenthesised sha token must not be empty: {text}"
+    );
 }
 
 #[test]

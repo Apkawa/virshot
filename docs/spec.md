@@ -537,14 +537,70 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
 
 - Встроенная иконка (простой camera glyph; кастомная — позже).
 - Левый клик — открыть окно настроек.
-- Правый клик — меню: `Take screenshot` (захват всего экрана), `Settings`, `Exit`.
-  Метки меню на языке UI (каталог `tray.*`, `src/tray.rs:62-70`) и пересобираются
-  на Apply (`tray::TrayController::refresh_menu`, `src/tray.rs:199-203`) — без
+- Правый клик — меню: `Take screenshot` (захват всего экрана), `Settings`, `Exit`,
+  `About` (4-й пункт после `Exit`, task `2026-11-10_about-dialog`). Метки меню на
+  языке UI (каталог `tray.*`, `src/tray.rs`) и пересобираются
+  на Apply (`tray::TrayController::refresh_menu`) — без
   перезапуска; tooltip остаётся `virshot` (не локализуется, `src/tray.rs:80-82`).
 - Выход — только из меню трея.
 - Интеграция `tray-icon` с event loop: решено (Stage 10) — polling глобальных
   receivers в UI-цикле eframe (`try_recv` каждый кадр, +repaint каждые 500 мс);
   ksni бэкенд требует D-Bus session, без него — typed-статус, приложение живёт.
+
+### 4.6. Окно «О программе» (About)
+
+- Пункт `About` из меню трея открывает дочерний viewport (`show_viewport_deferred`,
+  id `virshot-about`) на том же eframe-цикле — второй `EventLoop` не создаётся (§6).
+  Регистрация — каждый logic-pass пока окно живо (незарегистрированный pass его
+  закрывает; механика та же, что у тост-чипов §4.3), закрытие крестиком снимает флаг.
+- Хром окна — системный: заголовок `about.title` (каталог `about.*`), рамка
+  ресайза и кнопка закрытия включены (`ViewportBuilder::with_resizable`,
+  `with_close_button`); кнопки «свернуть» и «развернуть» сняты
+  (`with_minimize_button(false)`, `with_maximize_button(false)` — winit
+  `WindowAttributes::with_enabled_buttons`). На Windows и macOS их действительно
+  нет; на X11 и Wayland winit 0.30.13 документально не применяет этот флаг, поэтому
+  там они остаются — это ограничение платформы, не дефект окна. Проверка «кнопок
+  нет» — на реальном Windows (отложена, §9).
+- Закрытие — системной кнопкой окна (или вместе с выходом из приложения): запрос
+  закрытия фиксируется в paint-pass'е дочернего viewport в общий флаг, следующий
+  logic-pass снимает регистрацию, eframe сбрасывает `Arc<Window>` и окно
+  уничтожается; приложение остаётся живым в трее (§4.5), окно настроек не
+  затрагивается. `ViewportCommand::Close`/`CancelClose`/`Visible(false)` для
+  дочерних viewport не используются.
+- Повторный выбор `About` в меню трея не закрывает и не дублирует окно: уже
+  открытое окно поднимается наверх
+  (`ctx.send_viewport_cmd_to(about_viewport, ViewportCommand::Focus)`).
+- Заголовок: иконка приложения (текстура из `icons::APP_ICON_PNG`, загружается
+  один раз и принадлежит `SettingsApp`) + крупный `ViRShot <версия>` (ключ
+  `about.app_title`).
+- Под заголовком — ссылка на репозиторий (`about.repo_link`, `ui.hyperlink_to`,
+  URL `https://github.com/Apkawa/virshot` записан в коде, т.к. в манифестах
+  `repository` нет). Набор ссылок расширяется отдельной задачей.
+- Под ссылками — одна строка билда: `<short sha> <date>` (`shadow-rs`
+  `SHORT_COMMIT`, дата в Москве `+03:00` из `cargo:rustc-env=VIRSHOT_BUILD_TIME`,
+  алгоритм `civil_from_days` в `build.rs`); пустые значения печатаются как
+  `unknown`. Маркер сборки `debug|release` убран, ключи
+  `about.marker_debug`/`about.marker_release` удалены из каталога. Отдельные
+  строки «Версия», «Коммит», «Ветка» больше не показываются.
+- Версия (заголовок и `--version`) получает суффикс `-dev`, если HEAD не несёт
+  релизный тег `v<version>`: локальная сборка (в том числе `--release`) и nightly
+  без тега релиза показываются как `0.1.0-dev`. Ориентир — коммит с тегом версии
+  (`shadow-rs` `TAG` из `git tag -l --contains HEAD`, в CI — из `GITHUB_REF`);
+  `build.rs`, CI и `scripts/release.sh` не меняются.
+- Фон окна непрозрачный: `egui::CentralPanel` с `Frame::central_panel(style)`
+  (`visuals.panel_fill`) и отступами `Margin::symmetric(16, 8)`; `App::clear_color`
+  остаётся прозрачным, потому что тост-чипы и оверлей-viewport'ы (§4.3) требуют
+  прозрачной поверхности.
+- Все тексты — каталог `about.*` (§2), интерполяция `%{...}`; `about.app_title`
+  — бренд-нотация, печатается одинаково во всех локалях.
+- Ниже — весь `CHANGELOG.md` (`include_str!`), рендерится `egui_commonmark` в
+  прокручиваемой области; пустой changelog — локализованный placeholder.
+- Клик по ссылке открывает системный браузер (`eframe` feature `links` →
+  `egui-winit` → `webbrowser`: `xdg-open` на Linux, обработчик реестра на
+  Windows). Само приложение не делает сетевых запросов (§5). `Exit` из меню
+  закрывает root viewport — eframe гасит дочерние окна на shutdown. В
+  headless-режиме (GUI недоступен) запрос `About` — WARN в лог (§8-поведение
+  трея без GUI).
 
 ## 5. Нефункциональные требования
 
@@ -553,7 +609,8 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
 - **RAM:** < 30 МБ в фоне (без захвата). **CPU:** < 1% при простое. Ленивый
   font-fallback догружает один файл на скрипт (порядка 5–20 МБ на heap) только
   пока азиатский текст на экране — при `en`/`ru` расход 0.
-- **Безопасность:** никаких сетевых запросов; полная приватность.
+- **Безопасность:** никаких сетевых запросов из процесса приложения (ссылки
+  открывает системный браузер); полная приватность.
 - **Отказоустойчивость:** любая ошибка (нет доступа к папке, ошибка регистрации хоткея,
   неудачный захват) логируется и показывается тостом — без аварийного завершения.
 
@@ -642,6 +699,15 @@ on_all_monitors = true
 ## 8. CLI
 
 Флаги: `--config`, `--log`, `--log-level=DEBUG|INFO|ERROR`, `--version`, `--help`.
+
+- `--version` печатает contract-строку (task `2026-11-10_about-dialog`):
+  `virshot <version> (<short-sha>) built <build-time>` — `<version>` из манифеста
+  (`shadow-rs` `PKG_VERSION`), суффикс `-dev` если HEAD не несёт релизный тег
+  `v<version>` (`shadow-rs` `TAG`; меняется только токен `<version>`),
+  `<short-sha>` — короткий коммит (git через CLI),
+  `<build-time>` — дата сборки в Москве в ISO 8601 с `+03:00` (`build.rs`,
+  `VIRSHOT_BUILD_TIME`). Отсутствующие git/время печатаются как `unknown`
+  (ни пустых скобок, ни пустого поля). stdout, exit 0.
 
 Подкоманда (headless, для тестов захвата):
 

@@ -117,6 +117,10 @@ fn tray_action_mapping_menu_ids_map_to_actions() {
         action_for_menu_id(&MenuId(MENU_ID_EXIT.to_owned())),
         Some(TrayAction::Exit)
     );
+    assert_eq!(
+        action_for_menu_id(&MenuId(MENU_ID_ABOUT.to_owned())),
+        Some(TrayAction::About)
+    );
     assert_eq!(action_for_menu_id(&MenuId("other".to_owned())), None);
 }
 
@@ -134,6 +138,7 @@ fn menu_labels_match_spec_section_4_5() {
     );
     assert_en_catalog("tray.settings", &settings_label(), "Settings");
     assert_en_catalog("tray.exit", &exit_label(), "Exit");
+    assert_en_catalog("tray.about", &about_label(), "About");
 }
 
 #[test]
@@ -141,13 +146,15 @@ fn tray_menu_labels_render_through_catalog_keys() {
     let _guard = locale_guard();
     rust_i18n::set_locale("en");
 
-    // The menu builder renders exactly the catalog trio (`tray.take_screenshot`
-    // / `tray.settings` / `tray.exit`) in menu order, and the tooltip renders
-    // through `tray.tooltip` — spec §2: every tray string is a catalog lookup.
-    let (take, settings, exit) = menu_labels();
+    // The menu builder renders exactly the catalog quartet
+    // (`tray.take_screenshot` / `tray.settings` / `tray.exit` /
+    // `tray.about`) in menu order, and the tooltip renders through
+    // `tray.tooltip` — spec §2: every tray string is a catalog lookup.
+    let (take, settings, exit, about) = menu_labels();
     assert_eq!(take, rust_i18n::t!("tray.take_screenshot").as_ref());
     assert_eq!(settings, rust_i18n::t!("tray.settings").as_ref());
     assert_eq!(exit, rust_i18n::t!("tray.exit").as_ref());
+    assert_eq!(about, rust_i18n::t!("tray.about").as_ref());
     assert_en_catalog("tray.tooltip", &tooltip(), "virshot");
 }
 
@@ -162,7 +169,7 @@ fn tray_menu_rebuild_uses_current_locale_labels() {
     // auto-numbers predefined item ids (the separator gets a fresh id per
     // build — verified in the locked muda source, and `action_for_menu_id`
     // maps no such id), so the separator is compared by its slot position
-    // (no label), and the mapped trio by id + label + order.
+    // (no label), and the mapped quartet by id + label + order.
     let first = build_menu().expect("fresh items must append");
     let second = build_menu().expect("fresh items must append");
     let texts = |menu: &Menu| -> Vec<String> {
@@ -187,22 +194,23 @@ fn tray_menu_rebuild_uses_current_locale_labels() {
             MenuId(MENU_ID_TAKE_SCREENSHOT.to_owned()),
             MenuId(MENU_ID_SETTINGS.to_owned()),
             MenuId(MENU_ID_EXIT.to_owned()),
+            MenuId(MENU_ID_ABOUT.to_owned()),
         ],
         "mapped item ids must be stable across builds"
     );
 
-    // The labeled items are exactly the catalog trio in menu order — the same
-    // seam `refresh_menu` renders after a locale switch.
+    // The labeled items are exactly the catalog quartet in menu order — the
+    // same seam `refresh_menu` renders after a locale switch.
     let labels: Vec<String> = first
         .items()
         .iter()
         .filter_map(|kind| kind.as_menuitem().map(|item| item.text()))
         .collect();
-    let (take, settings, exit) = menu_labels();
+    let (take, settings, exit, about) = menu_labels();
     assert_eq!(
         labels,
-        vec![take, settings, exit],
-        "menu order must be take screenshot → settings → exit"
+        vec![take, settings, exit, about],
+        "menu order must be take screenshot → settings → exit → about"
     );
 }
 
@@ -224,6 +232,7 @@ fn tray_menu_labels_follow_russian_locale() {
             "Сделать снимок".to_owned(),
             "Настройки".to_owned(),
             "Выход".to_owned(),
+            "О программе".to_owned(),
         ),
         "the tray menu must render Russian labels under the ru locale"
     );
@@ -239,12 +248,16 @@ fn tray_menu_labels_render_in_each_locale() {
         "Take screenshot".to_owned(),
         "Settings".to_owned(),
         "Exit".to_owned(),
+        "About".to_owned(),
     );
-    let expected: [(&str, [&str; 3]); 4] = [
-        ("zh-CN", ["截屏", "设置", "退出"]),
-        ("es", ["Capturar pantalla", "Ajustes", "Salir"]),
-        ("ja", ["スクリーンショットを撮る", "設定", "終了"]),
-        ("ko", ["스크린샷 촬영", "설정", "종료"]),
+    let expected: [(&str, [&str; 4]); 4] = [
+        ("zh-CN", ["截屏", "设置", "退出", "关于"]),
+        ("es", ["Capturar pantalla", "Ajustes", "Salir", "Acerca de"]),
+        (
+            "ja",
+            ["スクリーンショットを撮る", "設定", "終了", "情報について"],
+        ),
+        ("ko", ["스크린샷 촬영", "설정", "종료", "정보"]),
     ];
 
     for (locale, labels) in expected {
@@ -262,6 +275,7 @@ fn tray_menu_labels_render_in_each_locale() {
                 labels[0].to_owned(),
                 labels[1].to_owned(),
                 labels[2].to_owned(),
+                labels[3].to_owned(),
             ),
             "the tray menu must render the {locale} catalog labels under {locale}"
         );

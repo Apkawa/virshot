@@ -558,3 +558,48 @@ tray.tooltip:
   es: "virshot"
   ja: "virshot"
   ko: "virshot"
+tray.about:
+  en: About
+  ru: "О программе"
+  zh-CN: 关于
+  es: Acerca de
+  ja: 情報について
+  ko: 정보
+
+# About window (about.rs, task 2026-11-10_about-dialog): metadata lines and
+# the changelog section. `%{...}` placeholders are filled by about::paint.
+about.title:
+  en: "About virshot"
+  ru: "О программе virshot"
+  zh-CN: "关于 virshot"
+  es: "Acerca de virshot"
+  ja: "virshotについて"
+  ko: "virshot 정보"
+about.app_title:
+  en: "ViRShot %{version}"
+  ru: "ViRShot %{version}"
+  zh-CN: "ViRShot %{version}"
+  es: "ViRShot %{version}"
+  ja: "ViRShot %{version}"
+  ko: "ViRShot %{version}"
+about.repo_link:
+  en: "GitHub repository"
+  ru: "Репозиторий на GitHub"
+  zh-CN: "GitHub 仓库"
+  es: "Repositorio en GitHub"
+  ja: "GitHub リポジトリ"
+  ko: "GitHub 저장소"
+about.changelog_heading:
+  en: Changelog
+  ru: "Журнал изменений"
+  zh-CN: 更新日志
+  es: Registro de cambios
+  ja: 変更履歴
+  ko: 변경 이력
+about.changelog_missing:
+  en: "Changelog is not available."
+  ru: "Журнал изменений недоступен."
+  zh-CN: "更新日志不可用。"
+  es: "Registro de cambios no disponible."
+  ja: "変更履歴を利用できません。"
+  ko: "변경 이력을 사용할 수 없습니다."

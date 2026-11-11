@@ -233,8 +233,8 @@ fn every_catalog_key_resolves_under_english() {
 
     assert_eq!(
         keys.len(),
-        76,
-        "locales/app.yml must declare exactly 76 shipped keys (extended when Stage 3 adds keys)"
+        82,
+        "locales/app.yml must declare exactly 82 shipped keys (76 up to Stage 11 + 6 About keys after Stage 12 dropped the build markers: title/app_title/repo_link/changelog_heading/changelog_missing/tray.about counted separately)"
     );
 
     for key in &keys {
@@ -333,7 +333,14 @@ const SUPPORTED_LOCALES: [&str; 6] = ["en", "ru", "zh-CN", "es", "ja", "ko"];
 /// every locale (`OK`, `virshot`, the ` ms` unit suffix). Only these keys
 /// may repeat the raw `en` value byte-for-byte; every other key must be
 /// translated. Quoted notation values (`ru: "OK"`) already differ raw.
-const NOTATION_KEYS: [&str; 3] = ["bottom.ok", "tray.tooltip", "overlay.duration_suffix"];
+/// The app title `about.app_title` is brand notation kept verbatim in every
+/// locale (task 2026-11-10_about-dialog).
+const NOTATION_KEYS: [&str; 4] = [
+    "bottom.ok",
+    "tray.tooltip",
+    "overlay.duration_suffix",
+    "about.app_title",
+];
 
 /// Completeness (spec §2, Stage 3/4): EVERY shipped key must carry nested
 /// `en:`, `ru:`, `zh-CN:`, `es:`, `ja:` and `ko:` lines, each value non-empty,
@@ -345,8 +352,8 @@ fn every_catalog_key_has_all_six_locale_translations() {
     let entries = catalog_entries(&catalog_text());
     assert_eq!(
         entries.len(),
-        76,
-        "locales/app.yml must declare exactly 76 shipped keys"
+        82,
+        "locales/app.yml must declare exactly 82 shipped keys (76 up to Stage 11 + 6 About keys after Stage 12 dropped the build markers: title/app_title/repo_link/changelog_heading/changelog_missing/tray.about counted separately)"
     );
 
     for (key, locales) in &entries {
@@ -511,8 +518,8 @@ fn all_six_locales_render_without_fallback_to_key_text() {
     let entries = catalog_entries(&catalog_text());
     assert_eq!(
         entries.len(),
-        76,
-        "locales/app.yml must declare exactly 76 shipped keys"
+        82,
+        "locales/app.yml must declare exactly 82 shipped keys (76 up to Stage 11 + 6 About keys after Stage 12 dropped the build markers: title/app_title/repo_link/changelog_heading/changelog_missing/tray.about counted separately)"
     );
 
     for locale in SUPPORTED_LOCALES {
@@ -595,6 +602,76 @@ fn interpolated_keys_substitute_placeholders_in_every_locale() {
         assert!(
             collisions.contains("/tmp/x") && collisions.contains("1000"),
             "{locale} too_many_collisions must carry both substituted args, got {collisions}"
+        );
+    }
+}
+
+/// The keys the redesigned About dialog renders (task 2026-11-10_about-dialog
+/// redesign): the header title, the app-title line, the repository link, and
+/// the changelog section. Every one of them must be declared in
+/// `locales/app.yml` with a non-empty value under all six shipped locales —
+/// same line-walk parser as the completeness tests, no YAML dependency. The
+/// build markers (`about.marker_debug`, `about.marker_release`) are gone:
+/// Stage 12 renders `<sha> <date>` with no channel marker.
+#[test]
+fn about_catalog_localizes_the_redesigned_keys_in_every_locale() {
+    let entries = catalog_entries(&catalog_text());
+
+    let redesigned_keys: [&str; 5] = [
+        "about.title",
+        "about.app_title",
+        "about.repo_link",
+        "about.changelog_heading",
+        "about.changelog_missing",
+    ];
+
+    for key in redesigned_keys {
+        let locales = entries
+            .iter()
+            .find(|(entry_key, _)| entry_key == key)
+            .map(|(_, locales)| locales.as_slice())
+            .unwrap_or_default();
+        assert!(
+            !locales.is_empty(),
+            "key `{key}` must be declared in locales/app.yml — the redesigned About dialog renders it"
+        );
+        for locale in SUPPORTED_LOCALES {
+            assert!(
+                locales
+                    .iter()
+                    .any(|(entry_locale, raw)| entry_locale == locale && !unquoted(raw).is_empty()),
+                "key `{key}` must declare a non-empty `{locale}:` line for the redesigned About dialog"
+            );
+        }
+    }
+}
+
+/// The redesign drops the per-field labels: the version moves into the dialog
+/// header and sha/date are rendered as one build line, so `about.version`,
+/// `about.commit`, `about.branch`, `about.build_debug` and `about.build_release`
+/// are dead wording and must be ABSENT from `locales/app.yml`. Stage 12 adds
+/// `about.marker_debug` and `about.marker_release` to the same list: the build
+/// line carries no debug/release marker, so the localized marker wording is
+/// dead too. RED by design until Stage 12 lands: the two marker keys are still
+/// declared in the shipped catalog.
+#[test]
+fn about_catalog_drops_labels_the_redesign_no_longer_uses() {
+    let entries = catalog_entries(&catalog_text());
+
+    let dropped_keys: [&str; 7] = [
+        "about.version",
+        "about.commit",
+        "about.branch",
+        "about.build_debug",
+        "about.build_release",
+        "about.marker_debug",
+        "about.marker_release",
+    ];
+
+    for key in dropped_keys {
+        assert!(
+            !entries.iter().any(|(entry_key, _)| entry_key == key),
+            "key `{key}` must be removed from locales/app.yml — the redesigned About dialog no longer renders that label"
         );
     }
 }

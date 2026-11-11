@@ -1169,6 +1169,33 @@ fn warning_icon_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     })
 }
 
+/// Decode the embedded app-icon asset and upload it as a texture for the
+/// About header, mirroring [`warning_icon_texture`]: egui 0.37 core has no
+/// PNG loader and the `egui_extras` loaders are OFF (no Uri/Bytes image
+/// path), so the bytes go through `icons::rgba` → `ColorImage::
+/// from_rgba_unmultiplied` → `Context::load_texture` — texture route only.
+/// Wrapped in `Arc` so the viewport callback can share the handle without
+/// re-uploading per paint (`TextureHandle::drop` frees the texture id).
+///
+/// Failure mode: [`icons::IconsError`] on invalid or corrupt PNG bytes —
+/// logged at WARN and `None`, so the About header paints its text without
+/// an icon and never panics.
+fn about_icon_texture(ctx: &egui::Context) -> Option<Arc<egui::TextureHandle>> {
+    match icons::rgba(icons::APP_ICON_PNG) {
+        Ok((rgba, width, height)) => Some(Arc::new(ctx.load_texture(
+            "virshot-about-icon",
+            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba),
+            egui::TextureOptions::default(),
+        ))),
+        Err(err) => {
+            tracing::warn!(
+                "About app icon decode failed: {err}; the About header paints text only"
+            );
+            None
+        }
+    }
+}
+
 /// Whether the draft differs from the applied settings (Apply button hint;
 /// closing without Apply discards the draft — spec §4.4).
 pub(crate) fn is_dirty(draft: &Settings, applied: &Settings) -> bool {
@@ -1306,6 +1333,26 @@ pub(crate) struct SettingsApp {
     /// Stage 13 retry fires on the transition INTO focus only — see
     /// [`should_retry_failed_registrations`].
     viewport_focused: Option<bool>,
+    /// About child viewport (task 2026-11-10_about-dialog, stage 10):
+    /// lifecycle state (`about::AboutWindow`). Tray `About` opens a closed
+    /// window and RAISES (Focus) an open one; the child paint pass records an
+    /// OS close request into the shared flag, and the next logic pass stops
+    /// registration — egui GCs the viewport and eframe drops the
+    /// `Arc<Window>`, destroying the window (`crates/overlay/src/host.rs:313-323`).
+    about_window: crate::about::AboutWindow,
+    /// Markdown cache for the About changelog. The viewport callback is
+    /// `Send + Sync + 'static` (egui 0.37), so the cache lives behind an Arc
+    /// the closure can own; the viewer itself is created per paint in
+    /// `about::paint`.
+    about_changelog_cache: Arc<Mutex<egui_commonmark::CommonMarkCache>>,
+    /// About header app icon: uploaded ONCE when About first opens
+    /// (`about_icon_texture`, lazily in the tray handler). Behind an `Arc`
+    /// because the viewport callback is `'static` and must share the handle
+    /// with app state — rebuilding it per paint pass would drop the previous
+    /// `TextureHandle` and free its texture id every frame. `None` when the
+    /// decode failed (logged at WARN) or About has never opened: the header
+    /// then paints text only.
+    about_icon: Option<Arc<egui::TextureHandle>>,
 }
 
 impl SettingsApp {
@@ -1341,6 +1388,11 @@ impl SettingsApp {
             exit_requested: false,
             close_for_exit: false,
             viewport_focused: None,
+            about_window: crate::about::AboutWindow::new(),
+            about_changelog_cache: Arc::new(
+                Mutex::new(egui_commonmark::CommonMarkCache::default()),
+            ),
+            about_icon: None,
         }
     }
 
@@ -2128,6 +2180,8 @@ impl eframe::App for SettingsApp {
     /// still shows its toast (spec §4.3). Tray actions are polled every pass:
     /// left click / `Settings` re-shows the window, `Take screenshot` spawns
     /// a full-screen capture with the applied settings + the shared mailbox,
+    /// `About` opens the About child viewport if closed and RAISES it (Focus)
+    /// if already open (task 2026-11-10_about-dialog),
     /// `Exit` requests a real shutdown (spec §4.5 — exit is tray-menu-only).
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(tray) = &self.tray {
@@ -2148,12 +2202,94 @@ impl eframe::App for SettingsApp {
                             capture::handoff_handle(&self.handoff),
                         );
                     }
+                    TrayAction::About => {
+                        // Tray select (user decision 2026-11-11): a CLOSED
+                        // About opens — the first logic pass registers it, the
+                        // first paint shows it (deferred viewports start
+                        // hidden, like toast chips). An OPEN About is RAISED,
+                        // never closed: `Focus` raises the window and
+                        // registration stays untouched.
+                        if self.about_window.select_from_tray() {
+                            // Upload the header icon ONCE on first open (lazy:
+                            // no GPU texture while About is never used). A
+                            // decode failure is logged and stays `None` — the
+                            // header paints text only.
+                            if self.about_icon.is_none() {
+                                self.about_icon = about_icon_texture(ctx);
+                            }
+                        } else {
+                            ctx.send_viewport_cmd_to(
+                                egui::ViewportId::from_hash_of("virshot-about"),
+                                egui::ViewportCommand::Focus,
+                            );
+                        }
+                        ctx.request_repaint();
+                    }
                     TrayAction::Exit => {
                         self.exit_requested = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         ctx.request_repaint();
                     }
                 }
+            }
+        }
+
+        // About child viewport (task 2026-11-10_about-dialog, stage 10):
+        // registered on EVERY pass while open (egui closes an unregistered
+        // child viewport — `crates/overlay/src/host.rs:314-323` precedent).
+        // An OS close CANNOT be observed here: eframe pushes
+        // `ViewportEvent::Close` into the CHILD's `ViewportInfo`
+        // (`glow_integration.rs:1075`), the child pass runs before this root
+        // pass (`run.rs:147-152`), and eframe clears the child's info after
+        // its pass (`glow_integration.rs:853`), so the old `raw.viewports…
+        // close_requested()` read was dead. `paint` records the request into
+        // the shared flag inside the CHILD pass, and `observe_close()` turns
+        // it into "closed" here. Stopping registration destroys the window:
+        // egui GCs the viewport and eframe drops the `Arc<Window>` (R10).
+        // No `ViewportCommand::Close`, no `CancelClose` (root-only, ignored
+        // for children), no `Visible(false)` (phantom hidden window). An open
+        // About never blocks tray Exit: Exit closes the ROOT viewport and
+        // eframe tears down child viewports on shutdown (spec open question 5).
+        self.about_window.observe_close();
+        if self.about_window.wants_registration() {
+            let about_viewport = egui::ViewportId::from_hash_of("virshot-about");
+            if let Some(close_flag) = self.about_window.close_flag() {
+                let cache = Arc::clone(&self.about_changelog_cache);
+                // Arc clone is O(1) — one reference-count bump. The callback
+                // is `Send + Sync + 'static` (egui 0.37), so the closure owns
+                // a shared handle to the app-state texture instead of
+                // uploading a new one per paint pass.
+                let about_icon = self.about_icon.clone();
+                // Chrome policy from `about::window_chrome()` (stage 9): title
+                // bar, close button and OS resize border stay; minimize and
+                // maximize buttons are off. The flags fold into winit's
+                // `WindowAttributes::with_enabled_buttons` at window creation;
+                // honored on Windows/macOS, inert on X11/Wayland. The builder
+                // stays constant per viewport id — egui applies builder
+                // changes by recreating the OS window.
+                let chrome = crate::about::window_chrome();
+                ctx.show_viewport_deferred(
+                    about_viewport,
+                    egui::ViewportBuilder::default()
+                        .with_title(rust_i18n::t!("about.title"))
+                        .with_inner_size([480.0, 360.0])
+                        .with_decorations(chrome.decorations)
+                        .with_resizable(chrome.resizable)
+                        .with_close_button(chrome.close_button)
+                        .with_minimize_button(chrome.minimize_button)
+                        .with_maximize_button(chrome.maximize_button),
+                    move |ui, _class| {
+                        crate::about::paint(
+                            ui,
+                            &mut cache
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                            about_icon.as_deref(),
+                            &close_flag,
+                        );
+                    },
+                );
+                ctx.request_repaint_of(about_viewport);
             }
         }
 

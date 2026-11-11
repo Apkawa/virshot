@@ -38,6 +38,9 @@ pub(crate) enum TrayAction {
     ShowSettings,
     /// `Take screenshot` menu item — full-screen capture (spec §4.5).
     TakeScreenshot,
+    /// `About` menu item — build-metadata window (spec §4.5, task
+    /// 2026-11-10_about-dialog).
+    About,
     /// `Exit` menu item — the only exit path (spec §4.5).
     Exit,
 }
@@ -57,7 +60,7 @@ fn unavailable(message: String) -> Error {
 }
 
 /// Menu labels — spec §4.5 wording, resolved from the catalog (spec §2:
-/// `tray.take_screenshot` / `tray.settings` / `tray.exit`).
+/// `tray.take_screenshot` / `tray.settings` / `tray.exit` / `tray.about`).
 fn take_screenshot_label() -> String {
     rust_i18n::t!("tray.take_screenshot").into_owned()
 }
@@ -70,10 +73,15 @@ fn exit_label() -> String {
     rust_i18n::t!("tray.exit").into_owned()
 }
 
+fn about_label() -> String {
+    rust_i18n::t!("tray.about").into_owned()
+}
+
 /// Internal menu item ids (mapped back onto actions in [`poll`]).
 const MENU_ID_TAKE_SCREENSHOT: &str = "virshot-take-screenshot";
 const MENU_ID_SETTINGS: &str = "virshot-settings";
 const MENU_ID_EXIT: &str = "virshot-exit";
+const MENU_ID_ABOUT: &str = "virshot-about";
 
 /// Tooltip shown by hosts that support one (ksni exposes it) — catalog
 /// `tray.tooltip`.
@@ -81,11 +89,16 @@ fn tooltip() -> String {
     rust_i18n::t!("tray.tooltip").into_owned()
 }
 
-/// The menu label trio, in menu order — the single seam that BOTH menu paths
+/// The menu labels, in menu order — the single seam that BOTH menu paths
 /// render ([`build_menu`] reads it), so the startup menu and the post-Apply
 /// rebuild can never drift from each other or from the catalog (spec §2).
-pub(crate) fn menu_labels() -> (String, String, String) {
-    (take_screenshot_label(), settings_label(), exit_label())
+pub(crate) fn menu_labels() -> (String, String, String, String) {
+    (
+        take_screenshot_label(),
+        settings_label(),
+        exit_label(),
+        about_label(),
+    )
 }
 
 /// Build the §4.5 menu with every label resolved from the CURRENT locale.
@@ -97,7 +110,7 @@ pub(crate) fn menu_labels() -> (String, String, String) {
 /// keep running.
 fn build_menu() -> Result<Menu, Error> {
     let menu = Menu::new();
-    let (take, settings, exit) = menu_labels();
+    let (take, settings, exit, about) = menu_labels();
 
     menu.append(&MenuItem::with_id(
         MENU_ID_TAKE_SCREENSHOT,
@@ -111,6 +124,8 @@ fn build_menu() -> Result<Menu, Error> {
     menu.append(&MenuItem::with_id(MENU_ID_SETTINGS, settings, true, None))
         .map_err(|err| unavailable(err.to_string()))?;
     menu.append(&MenuItem::with_id(MENU_ID_EXIT, exit, true, None))
+        .map_err(|err| unavailable(err.to_string()))?;
+    menu.append(&MenuItem::with_id(MENU_ID_ABOUT, about, true, None))
         .map_err(|err| unavailable(err.to_string()))?;
 
     Ok(menu)
@@ -145,6 +160,7 @@ pub(crate) fn action_for_menu_id(id: &MenuId) -> Option<TrayAction> {
         MENU_ID_TAKE_SCREENSHOT => Some(TrayAction::TakeScreenshot),
         MENU_ID_SETTINGS => Some(TrayAction::ShowSettings),
         MENU_ID_EXIT => Some(TrayAction::Exit),
+        MENU_ID_ABOUT => Some(TrayAction::About),
         _ => None,
     }
 }

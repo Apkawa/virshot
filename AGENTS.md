@@ -223,6 +223,35 @@ Placement follows the **visibility of the code under test**, never convenience.
 - **Error types:** `thiserror` (per-module error enums; typed errors over stringly `Err(String)`).
 - **Logging:** `tracing` + `tracing-subscriber` (file appender).
 - **CLI:** `clap`.
+- **Build metadata (About dialog + extended `--version`, approved by the user
+  2026-11-10, task `2026-11-10_about-dialog`):** `shadow-rs` 2.0.0 — a
+  `[build-dependencies]` entry with `default-features = false, features = ["build"]`
+  plus a runtime `[dependencies]` entry with `default-features = false` (only the
+  ungated `shadow_rs::shadow!` macro, which `include!`s the generated
+  `OUT_DIR/shadow.rs`). API: `shadow_rs::ShadowBuilder::builder()
+  .build_pattern(BuildPattern::RealTime).build()` in `build.rs` — **`set_metadata()`
+  does not exist in 2.0.0**. Constants in the generated module: `PKG_VERSION`,
+  `BUILD_TIME`/`BUILD_TIME_3339`/`BUILD_TIMESTAMP`, `BUILD_RUST_CHANNEL` (`"debug"`/`"release"` — there is **no** `DEBUG` const in 2.0.0), `SHORT_COMMIT`/`COMMIT_HASH`,
+  `BRANCH`, `TAG`, `RUST_VERSION`, `BUILD_TARGET`. The default `git2` feature stays
+  **off**: git fields come from the `git` CLI subprocess, so there is no `libgit2-sys`
+  C build on any target (incl. the Windows-gnu cross-build); missing git data leaves
+  the constants `""`. Never reference `build::CARGO_METADATA` (denied by default). The
+  Moscow `+03:00` build date is computed in `build.rs` and emitted as
+  `cargo:rustc-env=VIRSHOT_BUILD_TIME` — shadow-rs timestamps follow the *build host*
+  timezone and CI runners are UTC. `BuildPattern::RealTime` is required for a fresh
+  timestamp (`Lazy` skips rerun directives in debug). Transitive deps are pure Rust:
+  `const_format`, `is_debug`, `jiff` (build-side only).
+- **Markdown rendering in About:** `egui_commonmark` 0.26.0 with
+  `default-features = false` and **no extra features** (approved by the user
+  2026-11-10) — the `pulldown_cmark` feature is a documented no-op, parsing comes
+  from the mandatory `pulldown-cmark` dep. API: `CommonMarkViewer` (consuming builder,
+  `!Send`/`!Sync` ⇒ constructed inside the viewport UI closure) + `CommonMarkCache`
+  kept in app state; `show(...)` / `show_scrollable(id, ui, cache,
+  &CommonMarkScrollOptions::default().viewport_cache(true), text)`; `prepare_show` is
+  called internally, no manual install step. Transitive: `egui_commonmark_backend`,
+  `egui_extras` 0.37.0 (declared with `default-features = false`, so all image/file/
+  http/svg loaders stay off) and `pulldown-cmark`; **no** `fancy-regex` (the crate's
+  `regex` feature is fancy-regex), no `image`, no `syntect`, no proc-macro crates.
 - **Release tooling:** `git-cliff` is a dev **tool** (installed binary via
   `cargo install`), **not a crate dependency** — nothing in `Cargo.toml` or
   `Cargo.lock` references it. Pinned **2.14.2**, approved by the user:
