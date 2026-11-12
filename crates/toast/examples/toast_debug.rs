@@ -245,7 +245,8 @@ impl ToastDebugApp {
 }
 
 impl eframe::App for ToastDebugApp {
-    /// Alpha-0 clear, mirroring `src/gui.rs:1053-1059`: eframe's glow backend
+    /// Alpha-0 clear, mirroring `virshot`'s `App::clear_color`
+    /// (`src/gui/app.rs`): eframe's glow backend
     /// uses ONE app-level clear color for ALL viewports — including the toast
     /// child viewports the host creates — so alpha-0 is what lets transparent
     /// windows show through. The debug panel paints its own opaque fill below.
@@ -381,7 +382,7 @@ mod tests {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Mirrors virshot's root viewport (`src/gui.rs:1166-1172`): eframe derives
+    // Mirrors virshot's root viewport (`src/gui/window.rs`): eframe derives
     // the alpha-capable GL config from the ROOT viewport builder, and the toast
     // child viewports inherit transparency from it.
     let options = eframe::NativeOptions {

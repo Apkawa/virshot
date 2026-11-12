@@ -195,7 +195,7 @@ pub(crate) fn parse_controls(controls: &Controls) -> Result<Vec<ActionBinding>, 
 fn parse_binding(action: Action, binding: &Binding) -> Result<ActionBinding, Error> {
     // Reserved keys are checked before the notation so a typo reports the
     // reservation reason instead of an "unknown key". Bind-by-press already
-    // intercepts them in `gui::handle_capture_press`; this is the config path.
+    // intercepts them in `src/gui/hotkeys.rs` (`handle_capture_press`); this is the config path.
     if reserved_key_name(&binding.key).is_some() {
         return Err(Error::ReservedKey {
             action,
@@ -261,7 +261,7 @@ fn parse_binding(action: Action, binding: &Binding) -> Result<ActionBinding, Err
 /// `NumpadMultiply`/`NumpadClear` (egui collapses the numpad into digits,
 /// `Enter`, `Plus`, `Minus`, `Slash`) — are writable in `config.toml` and
 /// registered at startup/re-registration, but cannot be bound by a press in
-/// the settings window: the UI allowlist is `gui::SUPPORTED_KEY_NAMES`.
+/// the settings window: the UI allowlist is `gui::binding::SUPPORTED_KEY_NAMES`.
 ///
 /// Once a bare navigation key (`Insert`, `Delete`, `Home`, `End`, `PageUp`,
 /// `PageDown`, the arrows) is registered it is consumed system-wide, so other

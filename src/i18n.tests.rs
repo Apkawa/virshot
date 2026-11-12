@@ -13,23 +13,22 @@
 //! error, and `./locales/app.yml` does not exist yet.
 //!
 //! Determinism: no capture, no display, no clock. `rust_i18n::locale()` is a
-//! process-wide global, so every test that reads or changes it holds ONE
-//! mutex — otherwise a concurrent test on another thread could observe a
-//! locale another test set (rust-i18n caches the locale per thread, so
-//! restoring inside the guarded thread is sufficient).
+//! process-wide global, so every test that reads or changes it holds the
+//! crate-wide `LOCALE_LOCK` — otherwise a concurrent test on another thread
+//! could observe a locale another test set (rust-i18n caches the locale per
+//! thread, so restoring while the shared lock is held is sufficient).
 
 use super::*;
 
-use std::sync::Mutex;
 use std::sync::MutexGuard;
 
-/// Serializes every test that reads or writes the process-wide locale.
-static LOCALE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Take the locale lock; a poisoned lock (a panic in another locale test) is
-/// recovered rather than unwrapped, like every other mailbox in this crate.
+/// Take the crate-wide locale lock (`crate::LOCALE_LOCK`): the locale and its
+/// cache version are process-global, so locale-touching tests in every file
+/// serialize on this one lock, not on a per-file one. A poisoned lock (a panic
+/// in another locale test) is recovered rather than unwrapped, like every
+/// other mailbox in this crate.
 fn locale_guard() -> MutexGuard<'static, ()> {
-    LOCALE_LOCK
+    crate::LOCALE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -42,7 +41,7 @@ fn catalog_en_entries_resolve_to_original_english_text() {
     let _guard = locale_guard();
     rust_i18n::set_locale("en");
 
-    // Settings tabs (`gui::Tab::label`).
+    // Settings tabs (`Tab::label` in `src/gui/app.rs`).
     assert_eq!(rust_i18n::t!("general.tab_general"), "General");
     assert_eq!(rust_i18n::t!("general.tab_hotkeys"), "Hotkeys");
     assert_eq!(rust_i18n::t!("general.tab_overlay"), "Overlay");
@@ -107,12 +106,16 @@ fn catalog_en_entries_resolve_to_original_english_text() {
     );
     assert_eq!(rust_i18n::t!("overlay.test_button"), "Test overlay");
 
-    // Overlay tab test chip text: `gui::overlay_test_message` renders the
-    // success wording with the fixed test filename, so `overlay.test_message`
-    // IS `toast.saved` applied to `gui::OVERLAY_TEST_FILENAME`.
+    // Overlay tab test chip text: `gui::overlay::overlay_test_message` renders
+    // the success wording with the fixed test filename, so
+    // `overlay.test_message` IS `toast.saved` applied to
+    // `gui::overlay::OVERLAY_TEST_FILENAME`.
     assert_eq!(
-        rust_i18n::t!("toast.saved", file_name = gui::OVERLAY_TEST_FILENAME),
-        gui::overlay_test_message(gui::OVERLAY_TEST_FILENAME)
+        rust_i18n::t!(
+            "toast.saved",
+            file_name = gui::overlay::OVERLAY_TEST_FILENAME
+        ),
+        gui::overlay::overlay_test_message(gui::overlay::OVERLAY_TEST_FILENAME)
     );
 
     // Toast chip texts (`capture::saved_text`, `capture::Error::Save`).

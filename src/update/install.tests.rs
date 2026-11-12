@@ -1,4 +1,4 @@
-//! Unit tests for `update_install` (task 2026-11-11_auto-update, Stage 5).
+//! Unit tests for `update::install` (task 2026-11-11_auto-update, Stage 5).
 //! Pure logic behind seams: no network, no real self-replace. All scratch
 //! files live in `./.tmp/` (repo rule for test artifacts); the shipped code
 //! writes to the OS temp dir instead.
@@ -12,7 +12,7 @@ use std::io::Write;
 use std::rc::Rc;
 
 /// Real `release.yaml` values from the live nightly release (same fixture as
-/// `src/update.tests.rs`), used as manifest inputs.
+/// `src/update/update.tests.rs`), used as manifest inputs.
 const WIN_SHA512: &str =
     "2Gh+zeeFehW+ZXL5A30Q3pjMlbu7bSX8UjFkQgPZ5/fPUaQi+30grx2xiYdvTIS1CrH6afAV6hkKT3AU2a+feg==";
 const LINUX_SHA512: &str =
@@ -81,9 +81,9 @@ fn tar_gz_fixture(entries: &[(&str, u8, &[u8])]) -> Vec<u8> {
 }
 
 /// Manifest-shaped `UpdateInfo` whose sha512/size describe `archive_bytes`.
-fn update_info(commit_sha: &str, archive_url: &str, archive_bytes: &[u8]) -> update::UpdateInfo {
+fn update_info(commit_sha: &str, archive_url: &str, archive_bytes: &[u8]) -> super::UpdateInfo {
     let digest = sha512_of_reader(Cursor::new(archive_bytes.to_vec())).expect("fixture digest");
-    update::UpdateInfo {
+    super::UpdateInfo {
         version: "0.1.1".to_owned(),
         release_date: "2026-11-11T12:00:00.000Z".to_owned(),
         commit_sha: commit_sha.to_owned(),
@@ -534,7 +534,7 @@ fn install_with_checksum_mismatch_propagates_and_removes_temp_dir() {
     let dir = scratch_dir("install-checksum-fails");
     let archive_bytes = tar_gz_fixture(&[("virshot", b'0', b"ELF-bytes")]);
     // Valid base64 digest of a DIFFERENT asset → typed ChecksumMismatch.
-    let update = update::UpdateInfo {
+    let update = super::UpdateInfo {
         sha512: WIN_SHA512.to_owned(),
         ..update_info(
             "f710773",

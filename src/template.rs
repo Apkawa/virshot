@@ -15,7 +15,8 @@ use chrono::{DateTime, Local};
 /// %iso %t %n %ext`. A `%` followed by anything else is a typed error. Each
 /// entry is `(token name without the `%`, one-line description)`: the name is
 /// what [`render`] validates and expands, the description is what the settings
-/// window shows in the placeholder reference (`gui::placeholder_reference_lines`),
+/// window shows in the placeholder reference (`src/gui/general.rs`
+/// `placeholder_reference_lines`),
 /// so the UI never keeps its own copy of the list. Descriptions state what the
 /// renderer actually produces (see [`token_value`]), nothing more.
 pub(crate) const TOKENS: &[(&str, &str)] = &[

@@ -416,11 +416,11 @@ fn combo_label_matches_ui_binding_notation() {
     let parsed = bindings::parse_controls(&controls).expect("fixture parses");
     assert_eq!(
         combo_label(&parsed[0].hotkey),
-        crate::gui::binding_label(&controls.full_screen.key, &controls.full_screen.mods)
+        crate::gui::binding::binding_label(&controls.full_screen.key, &controls.full_screen.mods)
     );
     assert_eq!(
         combo_label(&parsed[1].hotkey),
-        crate::gui::binding_label(&controls.window.key, &controls.window.mods)
+        crate::gui::binding::binding_label(&controls.window.key, &controls.window.mods)
     );
 }
 

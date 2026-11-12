@@ -246,7 +246,7 @@ impl OverlayHost {
                     // Never `request_repaint_of` a viewport without a window: it
                     // pins that viewport's `repaint_delay` to ZERO, so every later
                     // request is deduplicated away and the window never gets a
-                    // redraw (`gui.rs:108-114`). The host loop repaint is enough —
+                    // redraw. The host loop repaint is enough —
                     // `paint` registers the viewport on this very pass.
                     ctx.request_repaint();
                 }
@@ -282,7 +282,8 @@ impl OverlayHost {
     }
 
     /// Registers each live overlay with egui and drives the first-frame
-    /// sequencing ported from `virshot/src/gui.rs`: the window is created
+    /// sequencing ported from `virshot`'s settings-window app
+    /// (`src/gui/app.rs`): the window is created
     /// hidden, painted while hidden, and shown only after its callback ran.
     fn paint(&mut self, ctx: &egui::Context) {
         let max_texture_side = ctx.input(|input| input.max_texture_side);
@@ -322,8 +323,8 @@ impl OverlayHost {
                 continue;
             }
 
-            // egui needs `show_viewport_deferred` on EVERY pass the child exists
-            // (`gui.rs:1250`): the pass that registers it is the pass that
+            // egui needs `show_viewport_deferred` on EVERY pass the child
+            // exists: the pass that registers it is the pass that
             // creates the window (`initialize_all_windows`).
             //
             // The builder is multiplied by the pixels-per-point eframe has when
@@ -373,7 +374,7 @@ impl OverlayHost {
             });
 
             // Commands are dropped by eframe — and silence later requests — when
-            // the viewport has no window yet (`gui.rs:1284`).
+            // the viewport has no window yet.
             if !ctx.input(|input| input.raw.viewports.contains_key(&viewport)) {
                 continue;
             }
@@ -472,7 +473,7 @@ impl OverlayHost {
 
         // The host window itself may be hidden (virshot keeps its settings window
         // hidden between hotkeys); egui runs no pass then, so no child viewport
-        // would ever paint or even be created. `gui.rs:1292-1296` asks the root
+        // would ever paint or even be created. So the host asks the root
         // for a hidden paint whenever an overlay is alive.
         if has_live {
             ctx.request_repaint();
@@ -1006,12 +1007,12 @@ mod tests {
         assert_eq!(
             builder.visible,
             Some(false),
-            "created hidden: an unpainted window is the white strip (gui.rs:1195-1205)"
+            "created hidden: an unpainted window is the white strip"
         );
         assert_eq!(builder.active, Some(false), "never steals focus");
         assert!(
             commands.is_empty(),
-            "eframe drops commands for a viewport with no window yet (gui.rs:1284)"
+            "eframe drops commands for a viewport with no window yet"
         );
     }
 
@@ -1069,7 +1070,7 @@ mod tests {
     fn an_alive_overlay_asks_the_root_viewport_to_paint_while_hidden() {
         // A hidden host window (virshot keeps its settings window hidden) runs
         // no pass, so egui would never paint or even create the child window
-        // (`gui.rs:1292-1296` does the same for a live toast).
+        // (the host asks the root for a hidden paint for a live overlay).
         let mut host = OverlayHost::new();
         let handle = host.handle();
         let id = handle

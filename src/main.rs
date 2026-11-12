@@ -33,7 +33,7 @@
 //! BEFORE the GUI via `tray::TrayController` so it exists even when the GUI
 //! cannot open; a tray failure is a typed ERROR log and the app keeps running
 //! without a tray.
-//! While the GUI runs, `gui::logic` maps tray actions (left click/Settings →
+//! While the GUI runs, `gui::SettingsApp::logic` maps tray actions (left click/Settings →
 //! re-show the hidden window; Take screenshot → full-screen capture; Exit →
 //! real shutdown, the only exit path). If the GUI cannot open, the main
 //! thread parks on an idle sleep tick that still polls the tray: Exit sets
@@ -96,8 +96,6 @@ mod logging;
 mod template;
 mod tray;
 mod update;
-mod update_install;
-mod update_notes;
 
 use chrono::Local;
 use clap::Parser;
@@ -121,6 +119,12 @@ use crate::config::Format;
 use crate::config::General;
 use crate::config::Settings;
 use crate::logging::Level;
+
+#[cfg(test)]
+/// Process-wide serialization for tests that mutate the process-global
+/// rust-i18n locale. rust-i18n's locale + cache version are global, so every
+/// locale-touching test file must hold THIS lock, not a per-file one.
+pub(crate) static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Idle tick for the resident app loop: idle CPU stays far under the §5 budget.
 const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(1);
@@ -146,7 +150,7 @@ const LOG_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(20
 /// `is_dev` is still passed by callers so the build kind is stated at the call
 /// site, but no longer changes the decision.
 /// `arm_startup_check` applies it on both resident paths; the interval checks
-/// live in `gui::App::logic` (GUI) and in `park_without_gui` (GUI-less).
+/// live in `gui::SettingsApp::logic` (GUI) and in `park_without_gui` (GUI-less).
 fn should_check_at_startup(interval: config::UpdateCheck, _is_dev: bool) -> bool {
     interval != config::UpdateCheck::Never
 }
@@ -272,8 +276,8 @@ fn main() -> ExitCode {
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_owned));
     let removed = match exe_dir.as_deref() {
-        Some(dir) => update_install::cleanup_leftovers(dir, &temp_dir),
-        None => update_install::cleanup_leftovers(&temp_dir, &temp_dir),
+        Some(dir) => update::install::cleanup_leftovers(dir, &temp_dir),
+        None => update::install::cleanup_leftovers(&temp_dir, &temp_dir),
     };
     if !removed.is_empty() {
         tracing::info!(
@@ -669,7 +673,7 @@ fn restart_if_update_requested(
 /// `restart_requested` (so `run_resident` runs the restart sequence). Checks
 /// re-spawn on the interval deadline; only `Never` schedules nothing — dev
 /// builds schedule on the same terms as release builds, mirroring
-/// `gui::App::logic`. The forced «Проверить обновления» button is a GUI
+/// `gui::SettingsApp::logic`. The forced «Проверить обновления» button is a GUI
 /// affordance (§4.7), so this path has no forced-check entry.
 fn park_without_gui(
     tray: Option<&tray::TrayController>,
@@ -702,7 +706,7 @@ fn park_without_gui(
                         // One plain std thread per install: `info` is moved in
                         // (thread boundary — no borrow of the loop's state).
                         std::thread::spawn(move || {
-                            let outcome = update_install::install(&info, |path| {
+                            let outcome = update::install::install(&info, |path| {
                                 self_replace::self_replace(path)
                             })
                             .map_err(|err| err.to_string());

@@ -250,7 +250,7 @@ fn toast_duration_ms(overlay: &Overlay) -> u32 {
 /// in the log; the wording comes from catalog `toast.saved` (spec §2). A path
 /// with no usable file name shows the full path rather than an empty chip.
 /// `pub(crate)` because the Overlay tab's test chip
-/// (`gui::overlay_test_message`) builds the very same wording without a real
+/// (`gui::overlay::overlay_test_message`) builds the very same wording without a real
 /// save, so the test button cannot drift from this format.
 pub(crate) fn saved_text(path: &Path) -> String {
     match path.file_name() {

@@ -749,7 +749,7 @@ fn failed_combos(
 }
 
 /// Combo label for UI and log text: modifiers in the UI canonical order
-/// (`Alt`, `Ctrl`, `Shift`, `Win` — the same order `gui::binding_label` prints
+/// (`Alt`, `Ctrl`, `Shift`, `Win` — the same order `gui::binding::binding_label` prints
 /// for config bindings), then the key in UI/config notation, so a failure
 /// reason names the combo exactly like the row shows it. The crate's own
 /// `Display` is lowercase, in a different order (`alt+KeyS`, shift first), and
@@ -779,7 +779,7 @@ fn combo_label(hotkey: &HotKey) -> String {
     }
 }
 
-/// Key name in UI/config notation. Config `key` and `gui::binding_label` use
+/// Key name in UI/config notation. Config `key` and `gui::binding::binding_label` use
 /// the bare letter/digit (`S`, `0`); the crate's `Code` spelling carries a
 /// prefix (`KeyS`, `Digit0`), so it is dropped for those two families. Every
 /// other code already matches config notation (`PrintScreen`, `F1`,

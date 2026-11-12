@@ -199,5 +199,5 @@ pub(crate) fn spawn_notes_fetch(
 }
 
 #[cfg(test)]
-#[path = "update_notes.tests.rs"]
+#[path = "notes.tests.rs"]
 mod tests;

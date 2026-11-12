@@ -1,18 +1,14 @@
 use super::*;
 
-use std::sync::Mutex;
 use std::sync::MutexGuard;
 
-/// Serializes every test that reads or writes the process-wide locale —
-/// `rust_i18n::locale()` is a process-wide global with a per-thread cache, so
-/// locale-touching tests must not run in parallel (same pattern as
-/// `i18n.tests.rs` / `capture.tests.rs`).
-static LOCALE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Take the locale lock; a poisoned lock (a panic in another locale test) is
-/// recovered rather than unwrapped, like every other mailbox in this crate.
+/// Take the crate-wide locale lock (`crate::LOCALE_LOCK`): the locale and its
+/// cache version are process-global, so locale-touching tests in every file
+/// serialize on this one lock, not on a per-file one. A poisoned lock (a panic
+/// in another locale test) is recovered rather than unwrapped, like every
+/// other mailbox in this crate.
 fn locale_guard() -> MutexGuard<'static, ()> {
-    LOCALE_LOCK
+    crate::LOCALE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -21,7 +17,8 @@ fn locale_guard() -> MutexGuard<'static, ()> {
 /// catalog's `en` value equals the shipped English contract byte-for-byte.
 /// Callers must hold `locale_guard()` and pin `"en"` first — this helper
 /// calls `t!` itself. Tests that never leave `en` need no further restore:
-/// the entry `set_locale("en")` pins this thread's cache for the whole test.
+/// `crate::LOCALE_LOCK` serializes locale mutations process-wide, so no other
+/// test changes the locale while this test holds it.
 fn assert_en_catalog(key: &str, rendered: &str, contract: &str) {
     assert_eq!(
         rendered,

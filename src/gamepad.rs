@@ -105,7 +105,7 @@ use crate::hotkeys::capture_mode;
 /// trigger or a capture commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CaptureField {
-    /// The keyboard bind button is capturing a key combo (`gui::capture_press`).
+    /// The keyboard bind button is capturing a key combo (`gui::SettingsApp::capture_press`).
     Keyboard,
     /// The pad bind button is capturing a pad press (Windows only).
     Pad,

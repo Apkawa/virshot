@@ -4,15 +4,14 @@
 //! logic; the viewport paint itself is GUI.
 
 use super::*;
-use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
-/// `rust_i18n::set_locale` is global process state; serialise locale tests
-/// like `tray.tests.rs` does and restore `en` on drop.
-static LOCALE_LOCK: Mutex<()> = Mutex::new(());
-
+/// Take the crate-wide locale lock (`crate::LOCALE_LOCK`): `rust_i18n::set_locale`
+/// mutates process-global state, so every locale-touching test file serialises
+/// on this single lock rather than a per-file one; locale tests restore `en`
+/// themselves.
 fn locale_guard() -> std::sync::MutexGuard<'static, ()> {
-    LOCALE_LOCK
+    crate::LOCALE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

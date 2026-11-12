@@ -1,8 +1,9 @@
 //! Corner placement math for overlay windows: pure geometry, no UI, no I/O.
 //!
-//! Mirrors the placement rules proven by `virshot`'s `gui::tests::toast_position_*`
-//! tests (see `src/gui.rs`), restated here as a standalone crate so the overlay
-//! backend and the toast chip can share one source of truth for corner anchors.
+//! Mirrors the placement rules proven by `virshot`'s toast placement tests,
+//! restated here as a standalone crate (covered by the `place_*` tests below)
+//! so the overlay backend and the toast chip can share one source of truth for
+//! corner anchors.
 //!
 //! Placement space is PHYSICAL desktop pixels: `winit` monitors report physical
 //! position/size, and both overlay backends take a physical rect (the host

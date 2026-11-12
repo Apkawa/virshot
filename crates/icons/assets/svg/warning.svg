@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <!-- Warning icon: rounded-corner warning triangle with a black
-       exclamation mark, for use in gui.rs. Palette: fill #F0B429, border
+       exclamation mark, for use in the settings GUI (src/gui/icons.rs). Palette: fill #F0B429, border
        and mark #181818 (same black as the app icon lens core). No
        background rect: the corners stay transparent so the rasterized PNG
        keeps alpha. -->

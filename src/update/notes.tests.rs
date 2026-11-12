@@ -1,4 +1,4 @@
-//! Sibling tests for `update_notes`: GitHub Releases API JSON parsing (the
+//! Sibling tests for `update::notes`: GitHub Releases API JSON parsing (the
 //! release `body` git-cliff renders, plus `html_url`), channel URL pinning for
 //! both API endpoints and both release-page fallback links, and the notes
 //! pipeline behind an injected fake fetcher. No network is performed here:

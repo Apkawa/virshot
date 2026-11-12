@@ -32,22 +32,18 @@ use overlay::OverlayHost;
 use std::error::Error as _;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::MutexGuard;
 use toast::MonitorSel;
 use toast::ToastColor;
 use toast::ToastService;
 
-/// Serializes every test that reads or writes the process-wide locale —
-/// `rust_i18n::locale()` is a process-wide global with a per-thread cache, so
-/// locale-touching tests must not run in parallel (same pattern as
-/// `i18n.tests.rs`).
-static LOCALE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Take the locale lock; a poisoned lock (a panic in another locale test) is
-/// recovered rather than unwrapped, like every other mailbox in this crate.
+/// Take the crate-wide locale lock (`crate::LOCALE_LOCK`): the locale and its
+/// cache version are process-global, so locale-touching tests in every file
+/// serialize on this one lock, not on a per-file one. A poisoned lock (a panic
+/// in another locale test) is recovered rather than unwrapped, like every
+/// other mailbox in this crate.
 fn locale_guard() -> MutexGuard<'static, ()> {
-    LOCALE_LOCK
+    crate::LOCALE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

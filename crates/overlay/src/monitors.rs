@@ -1,6 +1,6 @@
 //! Monitor enumeration for overlay/toast placement: one source of truth for
 //! the monitor list, the PRIMARY flag, and the physical rects both consumers
-//! need (`src/gui.rs` and `crates/toast/examples/toast_debug.rs` enumerate via
+//! need (`src/gui/window.rs` and `crates/toast/examples/toast_debug.rs` enumerate via
 //! `eframe::CreationContext::winit_window()`, which returns
 //! `&Arc<winit::window::Window>`).
 //!

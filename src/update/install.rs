@@ -37,7 +37,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::update;
+use super::UpdateInfo;
 
 /// Same budget as the manifest fetch: an asset is ~6 MB over a slow link.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -652,7 +652,7 @@ pub(crate) fn install_dir(commit_sha: &str) -> PathBuf {
 /// file name decides the unpack dispatch), `Io`, plus everything from the
 /// download/verify/unpack steps. Restart is the caller's job (module header).
 pub(crate) fn install(
-    update: &update::UpdateInfo,
+    update: &UpdateInfo,
     replace: impl Fn(&Path) -> Result<(), io::Error>,
 ) -> Result<(), InstallError> {
     install_with(
@@ -667,7 +667,7 @@ pub(crate) fn install(
 /// install temp dir, `download` stands in for [`download_archive`] (unit
 /// tests never hit the network), `replace` for `self_replace::self_replace`.
 fn install_with(
-    update: &update::UpdateInfo,
+    update: &UpdateInfo,
     dir: &Path,
     download: impl Fn(&str, &Path, u64) -> Result<(), InstallError>,
     replace: impl Fn(&Path) -> Result<(), io::Error>,
@@ -811,5 +811,5 @@ fn io_err(context: &str, err: io::Error) -> InstallError {
 }
 
 #[cfg(test)]
-#[path = "update_install.tests.rs"]
+#[path = "install.tests.rs"]
 mod tests;

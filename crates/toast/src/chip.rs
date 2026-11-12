@@ -1,5 +1,5 @@
-//! Chip geometry and painted content, ported from `virshot/src/gui.rs`
-//! (`toast_width`, `toast_window_size`) and `overlay::content::paint`.
+//! Chip geometry and painted content, ported from `virshot`'s toast painting
+//! and `overlay::content::paint`.
 //!
 //! Sizes are logical design units — the chip the painter draws at. Placement
 //! multiplies them by the target monitor's DPI scale (`placement::physical_size`)
@@ -11,23 +11,23 @@ use crate::color::ToastColor;
 use crate::color::palette;
 use crate::toast::Toast;
 
-/// Chip height, ported from `virshot/src/gui.rs:178` (`TOAST_HEIGHT`).
+/// Chip height, ported from `virshot`'s toast chip.
 const CHIP_HEIGHT: f64 = 36.0;
 
-/// Narrowest chip, ported from `virshot/src/gui.rs:181` (`TOAST_MIN_WIDTH`).
+/// Narrowest chip, ported from `virshot`'s toast chip.
 const CHIP_MIN_WIDTH: f64 = 220.0;
 
-/// Widest chip, ported from `virshot/src/gui.rs:182` (`TOAST_MAX_WIDTH`).
+/// Widest chip, ported from `virshot`'s toast chip.
 const CHIP_MAX_WIDTH: f64 = 460.0;
 
-/// Per-character width, ported from `virshot/src/gui.rs:186` (`TOAST_CHAR_WIDTH`).
+/// Per-character width, ported from `virshot`'s toast chip.
 const CHAR_WIDTH: f64 = 9.0;
 
-/// Horizontal padding, ported from `virshot/src/gui.rs:189` (`TOAST_PADDING`).
+/// Horizontal padding, ported from `virshot`'s toast chip.
 const CHIP_PADDING: f64 = 26.0;
 
-/// Corner radius of the chip, ported from the toast paint in
-/// `virshot/src/gui.rs:1270` (`rect_filled(rect, 8.0, …)`).
+/// Corner radius of the chip, ported from the toast paint in `virshot`
+/// (`rect_filled(rect, 8.0, …)`).
 const CHIP_RADIUS: f32 = 8.0;
 
 /// Image chip size: a square thumbnail, big enough to read on a chip-sized
@@ -35,7 +35,7 @@ const CHIP_RADIUS: f32 = 8.0;
 /// choice (the overlay demo uses a 200x120 image window).
 const IMAGE_CHIP_SIZE: [f64; 2] = [160.0, 160.0];
 
-/// Chip width from text length, ported from `virshot::toast_width` (`src/gui.rs:235`).
+/// Chip width from text length, ported from `virshot`'s toast width rule.
 pub(crate) fn chip_width(text: &str) -> f64 {
     ((text.chars().count() as f64) * CHAR_WIDTH + CHIP_PADDING)
         .clamp(CHIP_MIN_WIDTH, CHIP_MAX_WIDTH)
@@ -60,7 +60,7 @@ pub(crate) fn chip_content(toast: &Toast) -> OverlayContent {
             let colors = chip_colors(toast.color);
             let label = toast.text.clone();
             OverlayContent::Painter(Box::new(move |ui| {
-                // Ported from the toast paint in `virshot/src/gui.rs:1268-1278`
+                // Ported from the toast paint in `virshot`
                 // (`rect_filled` radius 8 + centered `painter().text`); the fade
                 // alpha is applied by the overlay via `Ui::set_opacity`.
                 let rect = ui.max_rect();

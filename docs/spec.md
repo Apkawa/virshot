@@ -342,7 +342,7 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
   `ToastService`, `ToastHandle`, latest-wins) и `crates/overlay` (бэкенд
   хост-цикла `OverlayHost` поверх `egui::Context` multi-viewport + чистая
   геометрия углов `place`). Собственный модуль `src/overlay.rs` и весь
-  toast-код в `src/gui.rs` удалены; правила ниже не изменились.
+  toast-код в `src/gui/` удалены; правила ниже не изменились.
 - **Владелец:** `SettingsApp` хранит `overlay::OverlayHost` и
   `toast::ToastService`; оба создаются в `create`-замыкании eframe в `gui::run`
   и живут до конца цикла. Порядок объявления полей — сервис **до** хоста:
@@ -448,10 +448,10 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
     уникальны (`duplicate_bindings` — ниже). Тултип disabled-кнопки называет
     блокирующий гейт; Cancel активен всегда.
 - **Язык UI (v9):** dropdown «Language» — **первая строка** вкладки "General",
-  перед «Save path» (`src/gui.rs:1759-1769`); шесть локалей с самоназваниями —
+  перед «Save path» (`src/gui/general.rs`); шесть локалей с самоназваниями —
   `English`, `Русский`, `简体中文`, `Español`, `日本語`, `한국어`; дефолт `en`
   (`general.language`, §7). Порядок Apply: сохранение `config.toml` →
-  `rust_i18n::set_locale` → пересборка меню трея (`src/gui.rs:1448-1466`,
+  `rust_i18n::set_locale` → пересборка меню трея (`src/gui/app.rs` `apply`,
   `tray::TrayController::refresh_menu`) — текст UI меняется без перезапуска;
   отказ пересборки меню — WARN в лог, приложение живёт (§5). Локализуется только
   текст UI: нотации остаются каноническими — имена клавиш (`Ctrl+PrintScreen`,
@@ -1090,22 +1090,24 @@ probe press dropped: <key> has no bindable name». DEBUG видны с
   Display`; метки меню трея под текущей локалью и их пересборка на Apply.
   `language`: дефолт `en`, partial TOML, снисходительная нормализация
   (неизвестное значение → `en`, остальные настройки целы), mapping кодов,
-  round-trip при сохранении. Покрытие — `src/i18n.tests.rs`, `src/gui.tests.rs`,
+  round-trip при сохранении. Покрытие — `src/i18n.tests.rs`, `src/gui/app.tests.rs` и `src/gui/general.tests.rs`,
   `src/tray.tests.rs`, `src/capture.tests.rs`, `src/config.tests.rs`; тесты,
-  тронувшие локаль, сериализуются через static mutex в каждом тест-файле —
-  `rust-i18n` кэширует локаль на потоке.
+  тронувшие локаль, сериализуются через единственный crate-wide mutex
+  `crate::LOCALE_LOCK` (`src/main.rs`, `cfg(test)`) — `rust-i18n` хранит локаль и
+  версию кэша глобально в процессе, поэтому per-file mutex не защищал от гонки
+  между тест-файлами.
 - **Счёт тестов (2026-11-12, замер на рабочем дереве поверх `5ad041c`):** 594
   юнит + 10 e2e (root package; 2 юнит и 1 e2e — `#[ignore]`, им нужны реальный
   дисплей/реальный бинарник; e2e с реальным дисплеем — ignored на headless-хосте).
-  Покрытие автообновления (v10): `src/update.tests.rs` (парсинг `release.yaml`,
+  Покрытие автообновления (v10): `src/update/update.tests.rs` (парсинг `release.yaml`,
   файл под платформу, `-dev`-сборки наравне с релизной
   (`run_check_dev_build_*`), deadline, `run_check` через fake-fetch без сети),
-  `src/update_notes.tests.rs` (URL канала и страницы релиза, парсинг API-ответа,
-  пустой/битый body), `src/update_install.tests.rs` (base64, sha512/размер,
+  `src/update/notes.tests.rs` (URL канала и страницы релиза, парсинг API-ответа,
+  пустой/битый body), `src/update/install.tests.rs` (base64, sha512/размер,
   распаковка `.zip` и `.tar.gz`, rejection путей с `..`, `install_with` на
   fake-download/fake-replace), `src/main.tests.rs` (решение startup-проверки —
   включая `-dev` — и исход перезапуска при неуспешном spawn), решения строки,
-  кнопки и тоста — `src/gui.tests.rs`; Stage 9 — слот/дедлайн helpers
+  кнопки и тоста — `src/gui/update.tests.rs`; Stage 9 — слот/дедлайн helpers
   (`check_in_flight_after`, `deadline_rearmed_by_outcome`,
   `forced_check_decision`, `schedule_after_apply`): drain результата до arm на
   первом проходе (`first_pass_outcome_drained_before_arm_leaves_button_enabled`),

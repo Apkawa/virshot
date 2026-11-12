@@ -1,8 +1,8 @@
 //! Chip palette per toast color (spec §4.3: default/success/danger/warning).
 //!
-//! `Default` is the ported `virshot` chip (`src/gui.rs:191-192`: dark chip,
-//! light text). `Danger` uses the repo's existing red-orange accent
-//! (`src/gui.rs:681` `WARNING_COLOR`) as its text color; success/warning
+//! `Default` is the ported `virshot` chip (dark chip, light text). `Danger`
+//! uses the repo's existing red-orange accent (`src/gui/icons.rs`
+//! `WARNING_COLOR`) as its text color; success/warning
 //! accents have no counterpart in virshot's toast painting (it paints one
 //! neutral chip), so those entries are new palette values tuned for the same
 //! dark chip.
@@ -29,13 +29,14 @@ pub(crate) struct ChipPalette {
     pub(crate) text: egui::Color32,
 }
 
-/// Dark chip fill ported from `virshot/src/gui.rs:191`.
+/// Dark chip fill ported from `virshot`'s toast chip.
 const CHIP_FILL: egui::Color32 = egui::Color32::from_rgb(24, 24, 24);
 
-/// Chip text color ported from `virshot/src/gui.rs:192`.
+/// Chip text color ported from `virshot`'s toast chip.
 const CHIP_TEXT: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);
 
-/// Red-orange accent ported from `virshot/src/gui.rs:681` (`WARNING_COLOR`).
+/// Red-orange accent ported from `virshot`'s warning color
+/// (`src/gui/icons.rs` `WARNING_COLOR`).
 const DANGER_TEXT: egui::Color32 = egui::Color32::from_rgb(246, 118, 100);
 
 /// Green accent (no virshot counterpart — new value on the same dark chip).
@@ -83,10 +84,10 @@ mod tests {
         let danger = palette(ToastColor::Danger);
         let warning = palette(ToastColor::Warning);
 
-        // Ported from virshot's toast painting (src/gui.rs:191-192).
+        // Ported from virshot's toast painting.
         assert_eq!(default.fill, egui::Color32::from_rgb(24, 24, 24));
         assert_eq!(default.text, egui::Color32::from_rgb(230, 230, 230));
-        // Danger's accent is the repo's existing red-orange (src/gui.rs:681).
+        // Danger's accent is the repo's existing red-orange (src/gui/icons.rs).
         assert_eq!(danger.text, egui::Color32::from_rgb(246, 118, 100));
 
         assert_eq!(success.text, egui::Color32::from_rgb(126, 200, 126));

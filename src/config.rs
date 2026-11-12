@@ -6,7 +6,7 @@
 //! first-run auto-creation of the default config.
 //!
 //! Wiring: `main.rs` calls `default_config_path` and `load_or_create` (which
-//! calls `load_or_default` → `load`, and `save` on first run); `gui.rs` uses
+//! calls `load_or_default` → `load`, and `save` on first run); `src/gui/general.rs` uses
 //! `home_dir` for the Browse picker start directory, so every item is used in
 //! the non-test build — no `#![allow(dead_code)]` needed.
 

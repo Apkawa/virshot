@@ -42,7 +42,7 @@ impl From<Box<dyn Fn(&mut egui::Ui) + Send>> for OverlayContent {
     }
 }
 
-/// Chip colors, matching `virshot`'s toast chip (`src/gui.rs`).
+/// Chip colors, matching `virshot`'s toast chip.
 const CHIP_FILL: egui::Color32 = egui::Color32::from_rgb(24, 24, 24);
 const CHIP_TEXT: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);
 
