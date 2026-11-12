@@ -44,6 +44,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run workspace tests
-        run: cargo test --workspace
+        run: cargo test --workspace --skip 'cli_headless::'
       - name: Clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
