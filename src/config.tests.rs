@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 
 #[test]
@@ -14,6 +16,11 @@ fn settings_defaults_match_spec_section_7() {
     assert_eq!(settings.general.format, Format::Png);
     assert_eq!(settings.general.jpeg_quality, 90);
     assert_eq!(settings.general.webp_quality, 90);
+
+    // Auto-update defaults (task 2026-11-11_auto-update spec): 1d / stable / false.
+    assert_eq!(settings.general.update_check, UpdateCheck::Day);
+    assert_eq!(settings.general.update_channel, UpdateChannel::Stable);
+    assert!(!settings.general.auto_install);
 
     assert_eq!(settings.controls.full_screen.key, "PrintScreen");
     assert_eq!(settings.controls.full_screen.mods, Vec::<String>::new());
@@ -647,6 +654,9 @@ fn save_then_load_round_trip_preserves_settings() {
             format: Format::Webp,
             jpeg_quality: 42,
             webp_quality: 77,
+            update_check: UpdateCheck::Hour,
+            update_channel: UpdateChannel::Nightly,
+            auto_install: true,
         },
         controls: Controls {
             full_screen: Binding::default(),
@@ -766,4 +776,149 @@ fn save_creates_file_with_toml_content() {
     let text = std::fs::read_to_string(&path).expect("saved file must be readable");
     assert!(text.contains("[general]"));
     assert!(text.contains("file_full_screen"));
+}
+
+// ---------- auto-update settings (task 2026-11-11_auto-update) ----------
+
+#[test]
+fn update_check_default_is_day() {
+    assert_eq!(UpdateCheck::default(), UpdateCheck::Day);
+}
+
+#[test]
+fn update_channel_default_is_stable() {
+    assert_eq!(UpdateChannel::default(), UpdateChannel::Stable);
+}
+
+#[test]
+fn update_check_interval_hour_returns_3600_seconds() {
+    assert_eq!(
+        UpdateCheck::Hour.interval(),
+        Some(Duration::from_secs(3600))
+    );
+}
+
+#[test]
+fn update_check_interval_day_returns_86400_seconds() {
+    assert_eq!(
+        UpdateCheck::Day.interval(),
+        Some(Duration::from_secs(86_400))
+    );
+}
+
+#[test]
+fn update_check_interval_week_returns_604800_seconds() {
+    assert_eq!(
+        UpdateCheck::Week.interval(),
+        Some(Duration::from_secs(604_800))
+    );
+}
+
+#[test]
+fn update_check_interval_never_returns_none() {
+    assert_eq!(UpdateCheck::Never.interval(), None);
+}
+
+#[test]
+fn load_update_check_parses_all_renamed_values() {
+    // The serde renames (`Format` pattern), not the variant names.
+    let dir = TempDir::new("update-check-values");
+    let cases = [
+        ("never", UpdateCheck::Never),
+        ("1h", UpdateCheck::Hour),
+        ("1d", UpdateCheck::Day),
+        ("1w", UpdateCheck::Week),
+    ];
+    for (raw, expected) in cases {
+        let path = dir.config_path(&format!("check-{raw}.toml"));
+        std::fs::write(&path, format!("[general]\nupdate_check = \"{raw}\"\n"))
+            .expect("fixture must be writable");
+
+        let settings = load(&path).expect("update_check value must parse");
+
+        assert_eq!(
+            settings.general.update_check, expected,
+            "{raw} must map to {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn load_update_settings_parses_explicit_channel_and_auto_install() {
+    let dir = TempDir::new("update-explicit");
+    let path = dir.config_path("config.toml");
+    std::fs::write(
+        &path,
+        "[general]\nupdate_channel = \"nightly\"\nauto_install = true\n",
+    )
+    .expect("fixture must be writable");
+
+    let settings = load(&path).expect("update settings must load");
+
+    assert_eq!(settings.general.update_channel, UpdateChannel::Nightly);
+    assert!(settings.general.auto_install);
+    // Omitted sibling keys still follow spec §7 defaults.
+    assert_eq!(settings.general.update_check, UpdateCheck::Day);
+    assert_eq!(settings.general.format, Format::Png);
+    assert_eq!(settings.general.jpeg_quality, 90);
+}
+
+#[test]
+fn load_partial_toml_fills_update_settings_defaults() {
+    // A config predating the auto-update keys must get the defaults without
+    // touching any other section (struct-level `#[serde(default)]`).
+    let dir = TempDir::new("partial-update");
+    let path = dir.config_path("config.toml");
+    std::fs::write(&path, "[overlay]\nenabled = false\n").expect("fixture must be writable");
+
+    let settings = load(&path).expect("partial config must load");
+
+    assert_eq!(settings.general.update_check, UpdateCheck::Day);
+    assert_eq!(settings.general.update_channel, UpdateChannel::Stable);
+    assert!(!settings.general.auto_install);
+    assert_eq!(settings.general, General::default());
+    assert!(!settings.overlay.enabled);
+}
+
+#[test]
+fn load_unknown_update_check_returns_parse_error_with_line() {
+    // Strict enum: an unknown value follows the existing parse-error path
+    // (`Error::Parse` with the offending line), like the invalid-TOML test.
+    let dir = TempDir::new("update-invalid");
+    let path = dir.config_path("config.toml");
+    std::fs::write(&path, "[general]\nupdate_check = \"monthly\"\n")
+        .expect("fixture must be writable");
+
+    let err = load(&path).expect_err("unknown update_check must fail");
+
+    let Error::Parse { line, .. } = err else {
+        panic!("expected Error::Parse, got {err:?}");
+    };
+    assert_eq!(line, Some(2));
+    assert!(err.to_string().contains(&path.display().to_string()));
+}
+
+#[test]
+fn save_then_load_round_trip_preserves_update_settings() {
+    let dir = TempDir::new("update-round-trip");
+    let path = dir.config_path("config.toml");
+    let settings = Settings {
+        general: General {
+            update_check: UpdateCheck::Never,
+            update_channel: UpdateChannel::Nightly,
+            auto_install: true,
+            ..General::default()
+        },
+        ..Settings::default()
+    };
+
+    save(&settings, &path).expect("save must succeed");
+    let loaded = load(&path).expect("saved config must load back");
+
+    assert_eq!(loaded, settings);
+    // The saved file carries the serde renames verbatim.
+    let text = std::fs::read_to_string(&path).expect("saved file must be readable");
+    assert!(text.contains("update_check = \"never\""));
+    assert!(text.contains("update_channel = \"nightly\""));
+    assert!(text.contains("auto_install = true"));
 }

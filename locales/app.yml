@@ -171,6 +171,54 @@ general.template_title_default:
   es: pantalla completa
   ja: フルスクリーン
   ko: 전체 화면
+# NEW labels + one localized option value for the automatic-update controls
+# (task 2026-11-11_auto-update Stage 2; UI wiring lands in a later stage, so
+# there is no source literal yet). The interval values (`1h`/`1d`/`1w`) and
+# channel values (`stable`/`nightly`) stay literal config strings in their
+# dropdowns — like the Format ComboBox, whose option labels are the config
+# names themselves — so only the `never` check-interval option needs a
+# localized value.
+general.update_channel_label:
+  en: Update channel
+  ru: "Канал обновлений"
+  zh-CN: 更新通道
+  es: Canal de actualizaciones
+  ja: 更新チャネル
+  ko: 업데이트 채널
+general.auto_install_label:
+  en: Install updates automatically
+  ru: "Автоматически устанавливать"
+  zh-CN: 自动安装更新
+  es: Instalar actualizaciones automáticamente
+  ja: 更新を自動でインストール
+  ko: 업데이트 자동 설치
+general.update_check_never:
+  en: never
+  ru: "никогда"
+  zh-CN: 从不
+  es: nunca
+  ja: しない
+  ko: 하지 않음
+# NEW row/button wording for the auto-update UI (task 2026-11-11_auto-update
+# Stage 6): the General-tab «Update available» row and its dialog-opening
+# button. The button wording matches the dialog's Install button (one
+# action, one label). The failure text after a failed install stays the
+# verbatim English `InstallError` display — technical errors are never
+# localized (capture::chip_text precedent), so no key exists for it.
+general.update_available_label:
+  en: "Update available"
+  ru: "Доступно обновление"
+  zh-CN: 有可用更新
+  es: Actualización disponible
+  ja: 更新が見つかりました
+  ko: 새 업데이트 발견
+general.install_update_button:
+  en: "Install update"
+  ru: "Обновление"
+  zh-CN: 安装更新
+  es: Instalar actualización
+  ja: 更新をインストール
+  ko: 업데이트 설치
 # NEW label for the language dropdown (Stage 2); no source literal yet.
 general.language_label:
   en: Language
@@ -603,3 +651,82 @@ about.changelog_missing:
   es: "Registro de cambios no disponible."
   ja: "変更履歴を利用できません。"
   ko: "변경 이력을 사용할 수 없습니다."
+
+# ── Auto-update dialog wording (task 2026-11-11_auto-update, Stage 6) ──
+# The update dialog is its own child viewport (spec §4.7): title, pending-
+# notes hint, notes-unavailable fallback (release.yaml summary + release
+# page link), and the discovery announcement toast. The install buttons
+# reuse `general.install_update_button` («Обновление») and `bottom.cancel`
+# («Отмена»); a failed install shows the verbatim English `InstallError`
+# text — technical errors are never localized (capture::chip_text), so no
+# key exists for it. `%{version}` interpolates via rust-i18n exactly like
+# `toast.saved` interpolates the file name.
+update.dialog_title:
+  en: "Update available"
+  ru: "Доступно обновление"
+  zh-CN: "有可用更新"
+  es: "Actualización disponible"
+  ja: "更新が見つかりました"
+  ko: "새 업데이트 발견"
+update.notes_loading:
+  en: "Loading release notes…"
+  ru: "Загружаем описание релиза…"
+  zh-CN: "正在加载发布说明…"
+  es: "Cargando notas de la versión…"
+  ja: "リリースノートを読み込み中…"
+  ko: "릴리스 노트 로드 중…"
+update.notes_unavailable:
+  en: "Release notes unavailable — see the release page"
+  ru: "Описание релиза недоступно — см. страницу релизов"
+  zh-CN: "发布说明不可用 — 请查看发布页"
+  es: "Notas de la versión no disponibles — consulta la página de la versión"
+  ja: "リリースノートを利用できません — リリースページを参照してください"
+  ko: "릴리스 노트를 사용할 수 없습니다 — 릴리스 페이지를 참조하세요"
+update.discovered_message:
+  en: "New version %{version} available"
+  ru: "Доступна новая версия %{version}"
+  zh-CN: "有新版本 %{version}"
+  es: "Nueva versión %{version} disponible"
+  ja: "新しいバージョン %{version} が利用可能です"
+  ko: "새 버전 %{version} 사용 가능"
+
+# ── Auto-update group wording (task 2026-11-11_auto-update, Stage 9) ──
+# The «Обновление» group on the General tab (spec §4.7): the section header,
+# the label above the interval dropdown, and the forced-check button under it.
+# `update.check_label` replaces the older `general.update_check_label`, which
+# Stage 9 dropped from the catalog as dead wording.
+update.section_title:
+  en: "Updates"
+  ru: "Обновление"
+  zh-CN: "更新"
+  es: "Actualizaciones"
+  ja: "更新"
+  ko: "업데이트"
+update.check_label:
+  en: "Check for updates"
+  ru: "Проверять обновления"
+  zh-CN: "检查更新"
+  es: "Comprobar actualizaciones"
+  ja: "更新を確認"
+  ko: "업데이트 확인"
+update.check_now_button:
+  en: "Check now"
+  ru: "Проверить обновления"
+  zh-CN: "立即检查更新"
+  es: "Comprobar ahora"
+  ja: "今すぐ確認"
+  ko: "지금 확인"
+
+# NEW result line for the forced-check button (task 2026-11-11_auto-update,
+# Stage 11): the plain-text outcome shown next to «Проверить обновления» when a
+# check reports no update. A failed check shows the verbatim English
+# `update::UpdateError` Display instead — technical errors are never localized
+# (capture::error_display precedent), so no key exists for that wording.
+update.no_updates_available:
+  en: "No updates available"
+  ru: "Обновлений нет"
+  zh-CN: "没有可用更新"
+  es: "No hay actualizaciones disponibles"
+  ja: "更新はありません"
+  ko: "업데이트 없음"
+

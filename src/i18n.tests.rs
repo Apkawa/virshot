@@ -233,8 +233,8 @@ fn every_catalog_key_resolves_under_english() {
 
     assert_eq!(
         keys.len(),
-        82,
-        "locales/app.yml must declare exactly 82 shipped keys (76 up to Stage 11 + 6 About keys after Stage 12 dropped the build markers: title/app_title/repo_link/changelog_heading/changelog_missing/tray.about counted separately)"
+        95,
+        "locales/app.yml must declare exactly 95 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
     );
 
     for key in &keys {
@@ -352,8 +352,8 @@ fn every_catalog_key_has_all_six_locale_translations() {
     let entries = catalog_entries(&catalog_text());
     assert_eq!(
         entries.len(),
-        82,
-        "locales/app.yml must declare exactly 82 shipped keys (76 up to Stage 11 + 6 About keys after Stage 12 dropped the build markers: title/app_title/repo_link/changelog_heading/changelog_missing/tray.about counted separately)"
+        95,
+        "locales/app.yml must declare exactly 95 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
     );
 
     for (key, locales) in &entries {
@@ -518,8 +518,8 @@ fn all_six_locales_render_without_fallback_to_key_text() {
     let entries = catalog_entries(&catalog_text());
     assert_eq!(
         entries.len(),
-        82,
-        "locales/app.yml must declare exactly 82 shipped keys (76 up to Stage 11 + 6 About keys after Stage 12 dropped the build markers: title/app_title/repo_link/changelog_heading/changelog_missing/tray.about counted separately)"
+        95,
+        "locales/app.yml must declare exactly 95 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
     );
 
     for locale in SUPPORTED_LOCALES {
@@ -674,4 +674,79 @@ fn about_catalog_drops_labels_the_redesign_no_longer_uses() {
             "key `{key}` must be removed from locales/app.yml — the redesigned About dialog no longer renders that label"
         );
     }
+}
+
+/// Stage 9 moves the interval-dropdown label into the «Обновление» group on
+/// the General tab: `update.check_label` is the group-local wording the
+/// ComboBox now renders, so `general.update_check_label` is dead wording and
+/// must be ABSENT from `locales/app.yml`, while the three keys the group
+/// renders must still be declared — same line-walk parser, no YAML dependency.
+#[test]
+fn update_catalog_drops_interval_label_key_the_section_title_replaces_it() {
+    let entries = catalog_entries(&catalog_text());
+
+    let dropped_keys: [&str; 1] = ["general.update_check_label"];
+
+    for key in dropped_keys {
+        assert!(
+            !entries.iter().any(|(entry_key, _)| entry_key == key),
+            "key `{key}` must be removed from locales/app.yml — the auto-update group renders `update.check_label` instead"
+        );
+    }
+
+    let group_keys: [&str; 3] = [
+        "update.section_title",
+        "update.check_label",
+        "update.check_now_button",
+    ];
+
+    for key in group_keys {
+        assert!(
+            entries.iter().any(|(entry_key, _)| entry_key == key),
+            "key `{key}` must be declared in locales/app.yml — the auto-update group renders it"
+        );
+    }
+}
+
+/// Stage 11 adds the plain-text result shown next to the «Проверить обновления»
+/// button when a check reports no update: `update.no_updates_available` must be
+/// declared in `locales/app.yml` with a non-empty value under all six shipped
+/// locales, and its Russian value must be exactly «Обновлений нет». A failed
+/// check keeps rendering the unlocalized `update::UpdateError` Display, so this
+/// key covers the success-with-no-update case only — same line-walk parser as
+/// the catalog tests, no YAML dependency.
+#[test]
+fn update_catalog_adds_the_no_updates_result_line_on_every_locale() {
+    let entries = catalog_entries(&catalog_text());
+
+    let locales = entries
+        .iter()
+        .find(|(entry_key, _)| entry_key == "update.no_updates_available")
+        .map(|(_, locales)| locales.as_slice())
+        .unwrap_or_default();
+
+    assert!(
+        !locales.is_empty(),
+        "key `update.no_updates_available` must be declared in locales/app.yml — the auto-update group renders it next to the check button"
+    );
+
+    for locale in SUPPORTED_LOCALES {
+        assert!(
+            locales
+                .iter()
+                .any(|(entry_locale, raw)| entry_locale == locale && !unquoted(raw).is_empty()),
+            "key `update.no_updates_available` must declare a non-empty `{locale}:` line"
+        );
+    }
+
+    let ru = locales
+        .iter()
+        .find(|(entry_locale, _raw)| entry_locale == "ru")
+        .map(|(_, raw)| unquoted(raw).to_owned())
+        .unwrap_or_default();
+
+    assert_eq!(
+        ru, "Обновлений нет",
+        "ru value must be the exact «Обновлений нет» wording, got {ru:?}"
+    );
 }

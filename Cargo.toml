@@ -18,7 +18,7 @@ xcap = { version = "0.9.8", features = ["wgc"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 chrono = "0.4.45"
 thiserror = "2"
-# Feature-trimmed for the <10 MB exe budget (spec §5): eframe defaults pull
+# Feature-trimmed for the < 12 MB exe budget (spec §5): eframe defaults pull
 # wgpu + accesskit + clipboard/system_fonts/web_screen_reader, unused by the MVP
 # UI. glow renderer only. x11/wayland are kept for the Linux dev host (winit
 # compile-errors without a platform backend there); both are unix-only deps, so
@@ -68,6 +68,36 @@ rust-i18n = "4.2.4"
 # the `build` feature stays OFF here (it lives in [build-dependencies] only) — no
 # cargo_metadata/git2 in the runtime graph, no jiff.
 shadow-rs = { version = "2.0.0", default-features = false }
+
+# Automatic self-update (task 2026-11-11_auto-update, approved by the user).
+# All feature-trimmed for the exe budget (docs/spec.md §5, revised to < 12 MB):
+# ureq is blocking HTTP with rustls + bundled webpki roots (no OS cert store, no
+# tokio/hyper, gzip OFF — archives are decompressed by flate2/zip below); sha2 is
+# digest-only (oid/alloc OFF); zip reads one deflate entry (aes/bzip2/lzma/ppmd/
+# zstd/xz/time OFF); flate2 is declared explicitly with the pure-Rust backend so
+# feature unification enables miniz_oxide for zip's deflate copy (the old "rust"
+# feature name no longer exists in 1.1.x); serde_json is already locked
+# transitively via rust-i18n, declaring it adds no new package; self-replace does
+# the in-place binary swap (its own cfg(windows) deps are already locked).
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+sha2 = { version = "0.11.1", default-features = false }
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+serde_json = "1.0.154"
+self-replace = "1.5.1"
+# YAML parsing of release.yaml (Stage 3 amendment, approved by the user
+# 2026-11-11): serde-saphyr is a DECLARATION of an already-locked transitive
+# crate — rust-i18n pulls it in via rust-i18n-macro -> rust-i18n-support
+# (`codegen` feature), so Cargo.lock gains only a serde-saphyr dependency edge
+# on the virshot package: ZERO new packages, the same declared-precedent shape
+# as flate2/serde_json above. The `deserialize` feature gates `from_str`; the
+# crate's own default features stay enabled through feature unification with
+# rust-i18n-support (rust-i18n-macro always enables codegen), so the feature
+# graph is unchanged. The code was previously compiler-side only (the macro
+# path), so only now — with `parse_manifest` referencing `from_str` — do the
+# deserializer objects enter the shipped exe (measured 2026-11-11: +14,080 B on
+# the linux release build, +22,016 B on the windows-gnu release build).
+serde-saphyr = { version = "1.3.0", default-features = false, features = ["deserialize"] }
 
 # Gamepad trigger on Windows (plan Stage 4, docs/spec.md §4.1 pad field): path
 # dep on `crates/gamepad` — the hand-written `gameinput.dll` COM shim extracted

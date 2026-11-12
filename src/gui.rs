@@ -145,7 +145,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::Duration;
+use std::time::Instant;
 
 use overlay::Corner;
 use overlay::OverlayHost;
@@ -178,6 +182,9 @@ use crate::hotkeys::key_label;
 use crate::template::TOKENS;
 use crate::tray::TrayAction;
 use crate::tray::TrayController;
+use crate::update;
+use crate::update_install;
+use crate::update_notes;
 
 /// Initial window size per spec §4.4 (~720×520; position/size not persisted).
 pub(crate) const INITIAL_WINDOW_WIDTH: f32 = 720.0;
@@ -1264,6 +1271,560 @@ pub(crate) fn close_decision(exit_requested: bool, closed_by_button: bool) -> Cl
     }
 }
 
+/// Install lifecycle state for the update row and dialog (task
+/// 2026-11-11_auto-update Stage 6, spec §4.7). `Clone` is justified: the
+/// deferred viewport callback is `'static` and needs an owned snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UpdateStatus {
+    /// No install running; the install action is offered.
+    Idle,
+    /// The install thread is running; the button is disabled.
+    Installing,
+    /// The install failed; the row shows the verbatim English message.
+    Failed(String),
+    /// The binary was replaced; the process must restart to run it. Stage 6
+    /// only RECORDS this — the restart wiring lands in Stage 7 (`main.rs`).
+    RestartPending,
+}
+
+/// Which dialog button the paint pass recorded; `logic` gates the effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateDialogButton {
+    Install,
+    Cancel,
+}
+
+/// The gated result of a dialog button press. No `PartialEq`: `UpdateInfo`
+/// has no equality derive (Stage 3 shipped it as `Debug, Clone`), so tests
+/// match on the variant and compare the short fields.
+#[derive(Debug, Clone)]
+pub(crate) enum UpdateDialogOutcome {
+    /// Hand the discovered update to the install path (owned: the install
+    /// thread needs it across the thread boundary).
+    Install(update::UpdateInfo),
+    /// Close the dialog, install nothing.
+    Dismiss,
+}
+
+/// Visibility of the update row in the General tab (spec §4.7): a held
+/// discovery is enough. Neither the interval nor dev-ness gates it — a
+/// discovery may come from the forced «Проверить обновления» button, which
+/// works with ANY interval including `Never`, and a `-dev` build checks
+/// updates on the same terms as a release build.
+pub(crate) fn update_row_visible(info: Option<&update::UpdateInfo>) -> bool {
+    info.is_some()
+}
+
+/// Enabled state of the forced-check button (spec §4.7): exactly ONE check may
+/// be in flight, so the button is disabled while `check_in_flight` is set.
+pub(crate) fn check_now_button_enabled(check_in_flight: bool) -> bool {
+    !check_in_flight
+}
+
+/// Whether the ONE background-check slot is occupied after a logic pass has
+/// armed the interval deadline (if it had to) and drained the check outcomes
+/// (spec §4.7: exactly one check in flight at a time, and the button gate
+/// reads this flag).
+///
+/// - `slot_busy`: the slot was already occupied at the start of the pass — a
+///   scheduled or forced check spawned by an earlier pass, whose deadline was
+///   consumed at spawn (`next_check = None`).
+/// - `outcome_drained`: this pass drained an outcome, which ENDS the check that
+///   produced it, so the slot is free afterwards whatever was armed.
+/// - `startup_deadline`: the deadline armed on the FIRST pass. It represents
+///   the startup check `main.rs` spawned before the event loop (both are the
+///   same interval gate: a `Never` interval arms nothing and spawns nothing),
+///   so it means "in flight" ONLY on that pass — an arm of a later pass is a
+///   FUTURE check, not a running one.
+///
+/// The pass-1 order matters: arming AFTER the drain put `check_in_flight` back
+/// ON after the startup outcome had already drained (a fast failure such as an
+/// HTTP 404, or a slow window init), and nothing ever cleared it again — no
+/// scheduled check fired and «Проверить обновления» stayed disabled for the
+/// whole session.
+pub(crate) fn check_in_flight_after(
+    slot_busy: bool,
+    outcome_drained: bool,
+    startup_deadline: Option<Instant>,
+) -> bool {
+    if outcome_drained {
+        false
+    } else {
+        slot_busy || startup_deadline.is_some()
+    }
+}
+
+/// Whether a button press starts a forced check (spec §4.7): the interval
+/// setting is IGNORED — `Never` still runs a check — while an in-flight check
+/// blocks a second one. `interval` is passed for the record, not for the
+/// decision; the scheduled deadline stays untouched either way (`logic` never
+/// re-arms it on a forced outcome).
+pub(crate) fn force_check_requested(_interval: config::UpdateCheck, check_in_flight: bool) -> bool {
+    !check_in_flight
+}
+
+/// Whether a drained outcome may re-arm the interval deadline (spec §4.7): only
+/// a SCHEDULED outcome moves the deadline; a FORCED outcome leaves it exactly
+/// where it was, so a manual «Проверить обновления» never shifts the background
+/// schedule.
+pub(crate) fn deadline_rearmed_by_outcome(forced_check_in_flight: bool) -> bool {
+    !forced_check_in_flight
+}
+
+/// What one logic pass does with the forced-check press the paint recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ForcedCheckDecision {
+    /// Spawn the forced check on this pass and clear the press record.
+    pub(crate) spawn: bool,
+    /// Keep the press recorded for a later pass: the single slot is busy — a
+    /// scheduled check may have taken it on THIS very pass — so the press must
+    /// not be dropped; it runs as soon as the slot frees.
+    pub(crate) pending: bool,
+}
+
+/// Forced-check press decision (spec §4.7): honored while the single slot is
+/// free (the interval is ignored — see [`force_check_requested`]) and kept
+/// PENDING while the slot is busy, so a press recorded during paint survives a
+/// pass in which the scheduled spawn consumed the slot.
+pub(crate) fn forced_check_decision(
+    interval: config::UpdateCheck,
+    pressed: bool,
+    check_in_flight: bool,
+) -> ForcedCheckDecision {
+    let honored = pressed && force_check_requested(interval, check_in_flight);
+    ForcedCheckDecision {
+        spawn: honored,
+        pending: pressed && !honored,
+    }
+}
+
+/// The background-check deadline after `apply()` (spec §4.7): the APPLIED
+/// interval governs background checks, so saving settings moves the schedule —
+/// a scheduled interval arms `now + interval` (an interval switch such as
+/// 1h→1d re-arms to the NEW interval, and `никогда`→scheduled arms the
+/// schedule without a restart), and `Never` clears the deadline so no extra
+/// check fires after the user turned checks off. A check already in flight is
+/// never cancelled: this decides the deadline only — the caller leaves
+/// `check_in_flight`/`forced_check_in_flight` untouched.
+pub(crate) fn schedule_after_apply(now: Instant, interval: config::UpdateCheck) -> Option<Instant> {
+    update::next_check_deadline(now, interval.interval())
+}
+
+/// The install action is offered in exactly ONE state: Idle. `Installing`
+/// must not start a second install thread; `Failed` keeps the button hidden
+/// so the row shows the error text instead (spec §4.7).
+pub(crate) fn install_button_enabled(status: &UpdateStatus) -> bool {
+    matches!(status, UpdateStatus::Idle)
+}
+
+/// The failure text the row shows INSTEAD of the button: the verbatim
+/// English `InstallError` display, no locale key — technical error text
+/// stays English (precedent: `capture::chip_text`). `None` outside Failed.
+pub(crate) fn install_failure_hint(status: &UpdateStatus) -> Option<&str> {
+    match status {
+        UpdateStatus::Failed(message) => Some(message.as_str()),
+        UpdateStatus::Idle | UpdateStatus::Installing | UpdateStatus::RestartPending => None,
+    }
+}
+
+/// The install request behind an Install press. The owned `UpdateInfo` is a
+/// justified clone: the install thread moves it across the thread boundary
+/// while app state keeps the discovery for the row. Nothing is requested
+/// while `Installing`/`Failed`/`RestartPending` or without a held discovery.
+pub(crate) fn install_request(
+    status: &UpdateStatus,
+    info: Option<&update::UpdateInfo>,
+) -> Option<update::UpdateInfo> {
+    if install_button_enabled(status) {
+        info.cloned()
+    } else {
+        None
+    }
+}
+
+/// Gate a dialog button press into its effect. Presses land in the outcome
+/// slot during the CHILD paint pass; `logic` gates them in the root pass —
+/// the same one-frame ordering as the About close flag. Cancel always
+/// dismisses; Install only requests while Idle with a held discovery (the
+/// button is disabled in other states; this gate is the second defense).
+pub(crate) fn dialog_outcome(
+    button: UpdateDialogButton,
+    status: &UpdateStatus,
+    info: Option<&update::UpdateInfo>,
+) -> Option<UpdateDialogOutcome> {
+    match button {
+        UpdateDialogButton::Cancel => Some(UpdateDialogOutcome::Dismiss),
+        UpdateDialogButton::Install => {
+            install_request(status, info).map(UpdateDialogOutcome::Install)
+        }
+    }
+}
+
+/// Auto-install path (spec §4.7): with `auto_install` ON, a discovery starts
+/// the install immediately — no dialog, no row. The caller passes the
+/// APPLIED flag (§4.4: published settings drive behavior).
+pub(crate) fn auto_install_on_discovery(info_present: bool, auto_install: bool) -> bool {
+    info_present && auto_install
+}
+
+/// Gate for the discovery chip, mirroring `capture::should_show` (§4.3):
+/// success-style chips show only while the overlay is enabled. Failure
+/// chips are ALWAYS shown and never pass through this gate.
+pub(crate) fn update_toast_enabled(
+    info: Option<&update::UpdateInfo>,
+    overlay_enabled: bool,
+) -> bool {
+    info.is_some() && overlay_enabled
+}
+
+/// State transition from the install thread's single outcome. `Ok` lands in
+/// `RestartPending`: the binary IS replaced and the process must restart to
+/// run it — Stage 6 only RECORDS that; Stage 7 wires it: `App::logic` sets
+/// `restart_requested` and sends `ViewportCommand::Close`, and `main.rs`
+/// drops the instance lock, spawns the new binary, and exits 0 (plus startup
+/// `update_install::cleanup_leftovers` on every start).
+/// `Err` keeps the verbatim message for the row and the danger chip.
+pub(crate) fn install_finished(outcome: &Result<(), String>) -> UpdateStatus {
+    match outcome {
+        Ok(()) => UpdateStatus::RestartPending,
+        Err(message) => UpdateStatus::Failed(message.clone()),
+    }
+}
+
+/// Discovery after an install result: success clears it (the row disappears;
+/// the restart banner is Stage 7's job), failure keeps it so the row can
+/// show the error. Takes the discovery by value — returned or dropped,
+/// never borrowed-and-cloned.
+pub(crate) fn update_info_after_install(
+    info: Option<update::UpdateInfo>,
+    ok: bool,
+) -> Option<update::UpdateInfo> {
+    if ok { None } else { info }
+}
+
+/// State transition when a NEW discovery arrives (spec §4.7, Stage 7): a
+/// discovery that lands while an install FAILURE is displayed re-opens the
+/// install action — the failure text belongs to the attempt that is over, so
+/// the state returns to `Idle` and the row offers Install again. `Installing`
+/// is untouched (a running install must not be interrupted), `Idle` stays
+/// `Idle`, and `RestartPending` stays: the binary is already replaced, so a
+/// discovery there describes the very bytes the restart is about to run.
+pub(crate) fn status_after_new_discovery(status: UpdateStatus) -> UpdateStatus {
+    match status {
+        UpdateStatus::Failed(_) => UpdateStatus::Idle,
+        other => other,
+    }
+}
+
+/// The result line painted next to «Проверить обновления» (task
+/// 2026-11-11_auto-update Stage 11 sub-item 2, spec §4.7): ONLY forced-check
+/// outcomes land here — scheduled/background results keep reporting through
+/// the discovery chip and the General row as before. `None` before the first
+/// forced check means no status text at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ForcedCheckStatus {
+    /// The last forced check found nothing newer than the running build —
+    /// the plain localized «Обновлений нет» (`update.no_updates_available`).
+    NoUpdates,
+    /// The last forced check failed: the verbatim English `UpdateError`
+    /// Display, never localized (precedent: `capture::error_display`), drawn
+    /// in the same warning styling as the install-failure hint.
+    Failed(String),
+}
+
+/// The result line after ONE drained check outcome (sub-item 2): a
+/// SCHEDULED outcome leaves the slot exactly as it was; a FORCED outcome
+/// REPLACES it — `UpToDate` → «Обновлений нет», `Failed` → the verbatim
+/// `UpdateError` Display, `Updated` → cleared, because the discovery row
+/// shows that result and a stale line must never sit beside a fresh
+/// «Доступно обновление». Takes the slot by value — returned or dropped,
+/// never borrowed-and-cloned.
+pub(crate) fn forced_check_status_after(
+    slot: Option<ForcedCheckStatus>,
+    outcome: &update::CheckOutcome,
+    forced: bool,
+) -> Option<ForcedCheckStatus> {
+    if !forced {
+        return slot;
+    }
+    match outcome {
+        update::CheckOutcome::UpToDate => Some(ForcedCheckStatus::NoUpdates),
+        update::CheckOutcome::Failed(err) => Some(ForcedCheckStatus::Failed(err.to_string())),
+        update::CheckOutcome::Updated(_) => None,
+    }
+}
+
+/// What the paint pass renders in the slot: NOTHING while a FORCED check is
+/// in flight (the slot stays untouched until its outcome drains — no
+/// half-result while the button is disabled), otherwise the held line.
+pub(crate) fn forced_check_status_shown(
+    slot: Option<&ForcedCheckStatus>,
+    forced_check_in_flight: bool,
+) -> Option<&ForcedCheckStatus> {
+    if forced_check_in_flight { None } else { slot }
+}
+
+/// Stale-discovery reset (sub-item 4, spec §4.7): a check outcome REPLACES
+/// the previous result. An up-to-date outcome — FORCED or scheduled — clears
+/// the held discovery (nothing newer exists anymore); a failed FORCED check
+/// clears it too (the user's bug: a nightly discovery kept «Доступно
+/// обновление» after switching the channel to `stable` and the forced check
+/// answering 404); a failed SCHEDULED check KEEPS it (a transient
+/// network/rate-limit blip must not erase an actionable update — the next
+/// interval retries). `Updated` never clears here: the drain replaces the
+/// discovery with the new one (or auto-install consumes it). While an
+/// install is in progress NOTHING ever clears: the running install owns its
+/// discovery, and a failure that lands afterwards keeps the row for the
+/// retry (`update_info_after_install`).
+pub(crate) fn discovery_cleared_by_check_outcome(
+    outcome: &update::CheckOutcome,
+    forced: bool,
+    install_status: &UpdateStatus,
+) -> bool {
+    if matches!(install_status, UpdateStatus::Installing) {
+        return false;
+    }
+    match outcome {
+        update::CheckOutcome::UpToDate => true,
+        update::CheckOutcome::Failed(_) => forced,
+        update::CheckOutcome::Updated(_) => false,
+    }
+}
+
+/// Lifecycle of the update child viewport — the exact shape of
+/// `about::AboutWindow` (task 2026-11-10 stage 10): an OS close request is
+/// visible ONLY in the child viewport's input pass, so the paint records it
+/// into a shared flag; the next logic pass sees the flag, stops
+/// registration, egui GCs the viewport, and eframe drops the `Arc<Window>`
+/// (`crates/overlay/src/host.rs:313-323`). Not reusing `about::AboutWindow`:
+/// its name and tray semantics belong to the About module (SRP), and this
+/// dialog additionally needs the Cancel-button close path.
+pub(crate) struct UpdateDialogWindow {
+    open: bool,
+    close_flag: Arc<AtomicBool>,
+}
+
+impl UpdateDialogWindow {
+    /// Closed state with an inert flag; opening replaces the flag, so a
+    /// stale flag is never handed to a paint callback.
+    fn new() -> Self {
+        Self {
+            open: false,
+            close_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Open with a FRESH close flag; returns whether this call newly opened
+    /// (a re-open of an already-open viewport must not inherit state — same
+    /// rule as `about::AboutWindow::open`).
+    fn open(&mut self) -> bool {
+        if self.open {
+            return false;
+        }
+        self.close_flag = Arc::new(AtomicBool::new(false));
+        self.open = true;
+        true
+    }
+
+    /// Cancel-button close: no OS request happened, but the next pass must
+    /// stop registration like one did (egui GCs the viewport).
+    fn close(&mut self) {
+        self.open = false;
+    }
+
+    /// Observe the shared flag: true (and now closed) when the child pass
+    /// recorded an OS close request since the last observation.
+    fn observe_close(&mut self) -> bool {
+        if self.open && self.close_flag.load(Ordering::Relaxed) {
+            self.open = false;
+            return true;
+        }
+        false
+    }
+
+    /// Whether the logic pass must call `show_viewport_deferred` for this
+    /// viewport (stopping registration = GC, see the struct doc).
+    fn wants_registration(&self) -> bool {
+        self.open
+    }
+
+    /// Close-flag handle for the paint callback, `None` when closed. The
+    /// `Arc` clone is O(1) — one refcount bump, shared with app state.
+    fn close_flag(&self) -> Option<Arc<AtomicBool>> {
+        if self.open {
+            Some(Arc::clone(&self.close_flag))
+        } else {
+            None
+        }
+    }
+}
+
+/// What the update dialog paints on a pass, built from the snapshots the
+/// deferred callback owns, so the callback stays `'static`.
+struct UpdateDialogView<'a> {
+    /// `None` = fetch pending (loading hint); `Some` = arrived result.
+    notes: Option<&'a Result<Arc<update_notes::ReleaseNotes>, update_notes::NotesError>>,
+    /// Held discovery: version line + fallback summary. `None` only in the
+    /// auto-install path, which never opens the dialog.
+    info: Option<&'a update::UpdateInfo>,
+    /// APPLIED channel, for the release-page fallback URL.
+    channel: config::UpdateChannel,
+    /// Install-state snapshot driving the button's enabled flag.
+    status: &'a UpdateStatus,
+}
+
+/// Paint the update dialog in its deferred child viewport — the exact About
+/// pattern (task 2026-11-10 stage 10, verified against the locked egui 0.37
+/// sources): record an OS close request into the shared flag (only the child
+/// pass sees it), fill an OPAQUE background (the app's clear color is alpha-0
+/// and `Frame::central_panel` covers the whole viewport), render notes with
+/// the scrollable `egui_commonmark` viewer (`viewport_cache(true)`, viewer
+/// `!Send` → constructed per paint), and end with the install/cancel buttons
+/// (spec §4.7). NOT modal: the settings window keeps working while the
+/// dialog is open.
+fn paint_update_dialog(
+    ui: &mut egui::Ui,
+    cache: &mut egui_commonmark::CommonMarkCache,
+    close_flag: &AtomicBool,
+    slot: &Mutex<Option<UpdateDialogButton>>,
+    view: &UpdateDialogView<'_>,
+) {
+    if ui.input(|i| i.viewport().close_requested()) {
+        close_flag.store(true, Ordering::Relaxed);
+    }
+    let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(16, 8));
+    egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+        if let Some(info) = view.info {
+            // The discovered version is a technical value kept literal
+            // (About build-line convention), so no locale key here.
+            ui.label(
+                egui::RichText::new(info.version.as_str())
+                    .size(18.0)
+                    .strong(),
+            );
+        }
+        ui.separator();
+        match view.notes {
+            None => {
+                ui.label(rust_i18n::t!("update.notes_loading"));
+            }
+            Some(Ok(notes)) if !notes.body.is_empty() => {
+                egui_commonmark::CommonMarkViewer::new().show_scrollable(
+                    egui::Id::unique("virshot-update-notes"),
+                    ui,
+                    cache,
+                    &egui_commonmark::CommonMarkScrollOptions::default().viewport_cache(true),
+                    &notes.body,
+                );
+            }
+            // Fallback (spec §4.7): an empty body or a fetch failure shows
+            // the release.yaml summary plus the release-page link — the
+            // technical values stay literal and the URL is verbatim (About
+            // repo-link precedent).
+            Some(Ok(_)) | Some(Err(_)) => {
+                ui.label(rust_i18n::t!("update.notes_unavailable"));
+                if let Some(info) = view.info {
+                    ui.label(format!(
+                        "{} · {} · {}",
+                        info.version, info.release_date, info.commit_sha
+                    ));
+                }
+                let url = view
+                    .notes
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|notes| notes.html_url.as_str())
+                    .unwrap_or_else(|| update_notes::release_page_url(view.channel));
+                ui.hyperlink(url);
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            let install_clicked = ui
+                .add_enabled(
+                    install_button_enabled(view.status),
+                    egui::Button::new(rust_i18n::t!("general.install_update_button")),
+                )
+                .clicked();
+            let cancel_clicked = ui.button(rust_i18n::t!("bottom.cancel")).clicked();
+            if install_clicked || cancel_clicked {
+                // RECORDED, not acted on: the root logic pass gates the press
+                // against current state (`dialog_outcome`).
+                let button = if install_clicked {
+                    UpdateDialogButton::Install
+                } else {
+                    UpdateDialogButton::Cancel
+                };
+                *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(button);
+            }
+        });
+    });
+}
+
+/// Selected text of the interval dropdown: `never` is a decision word —
+/// localized (spec §4.4); the intervals are config literals shown verbatim
+/// (`1h`/`1d`/`1w`), exactly like the Format dropdown's `png`/`jpg`/`webp`
+/// option labels — technical values stay unlocalized.
+fn update_check_selected_text(check: config::UpdateCheck) -> String {
+    match check {
+        config::UpdateCheck::Never => rust_i18n::t!("general.update_check_never").into_owned(),
+        config::UpdateCheck::Hour => "1h".to_owned(),
+        config::UpdateCheck::Day => "1d".to_owned(),
+        config::UpdateCheck::Week => "1w".to_owned(),
+    }
+}
+
+/// Chip geometry from the APPLIED overlay settings: the same monitor /
+/// corner / clamped-hold mapping `capture::toast_from_outcome` applies to
+/// real chips. Those helpers are private in capture, so this duplicates the
+/// three-line mapping locally instead of widening capture's interface
+/// (precedent: `test_overlay_toast`).
+fn update_chip_geometry(overlay: &Overlay) -> (MonitorSel, Corner, u32) {
+    let monitor = if overlay.on_all_monitors {
+        MonitorSel::All
+    } else {
+        MonitorSel::Index(0)
+    };
+    let corner = match overlay.position {
+        OverlayPosition::TopLeft => Corner::TopLeft,
+        OverlayPosition::TopRight => Corner::TopRight,
+        OverlayPosition::BottomLeft => Corner::BottomLeft,
+        OverlayPosition::BottomRight => Corner::BottomRight,
+    };
+    let duration_ms = u32::try_from(overlay.duration_ms).unwrap_or(u32::MAX);
+    (monitor, corner, duration_ms)
+}
+
+/// Discovery chip (success style — gated by `update_toast_enabled` BEFORE
+/// this is built): localized announcement with the version interpolated, the
+/// same `%{...}` mechanism as the save chip's file name.
+fn update_discovery_chip(overlay: &Overlay, info: &update::UpdateInfo) -> Toast {
+    let (monitor, corner, duration_ms) = update_chip_geometry(overlay);
+    Toast {
+        monitor,
+        text: rust_i18n::t!("update.discovered_message", version = info.version.as_str())
+            .into_owned(),
+        image: None,
+        color: ToastColor::Success,
+        corner,
+        duration_ms,
+    }
+}
+
+/// Install-failure chip: ALWAYS shown (danger chips ignore the overlay
+/// toggle, §4.3 `should_show`) with the verbatim English error text — no
+/// locale key for technical failures (capture::chip_text precedent).
+fn update_failure_chip(overlay: &Overlay, message: &str) -> Toast {
+    let (monitor, corner, duration_ms) = update_chip_geometry(overlay);
+    Toast {
+        monitor,
+        text: message.to_owned(),
+        image: None,
+        color: ToastColor::Danger,
+        corner,
+        duration_ms,
+    }
+}
+
 /// GUI failures: window/graphics setup only. Tab logic itself cannot fail —
 /// Apply failures are logged and the app keeps running (spec §5).
 #[derive(Debug, thiserror::Error)]
@@ -1353,6 +1914,94 @@ pub(crate) struct SettingsApp {
     /// decode failed (logged at WARN) or About has never opened: the header
     /// then paints text only.
     about_icon: Option<Arc<egui::TextureHandle>>,
+    /// Held update discovery (task 2026-11-11_auto-update Stage 6, spec §4.7):
+    /// the newest `CheckOutcome::Updated` drained in `logic`; `None` until a
+    /// check finds something newer than the running build. Cleared by a
+    /// successful install (`update_info_after_install`); kept on failure so
+    /// the row can show the error.
+    update: Option<update::UpdateInfo>,
+    /// Background-check hand-off receiver (task 2026-11-11_auto-update
+    /// Stage 7, spec §4.7): `main.rs` creates the channel and moves BOTH
+    /// halves into `gui::run` — the GUI does not create its own. Contract:
+    /// drained ONLY in `App::logic`; draining a closed channel is a cheap
+    /// no-op and never blocks. `Option` so the drain can take it by reference
+    /// while app state stays borrowable.
+    update_rx: Option<mpsc::Receiver<update::CheckOutcome>>,
+    /// Sender half for every check this app spawns (Stage 7): scheduled and
+    /// forced checks send on this clone. A `Sender` clone is O(1) — a refcount
+    /// bump on the shared channel — so it is never wrapped in `Arc`
+    /// (AGENTS.md: `Sender` already clones in O(1)).
+    update_tx: mpsc::Sender<update::CheckOutcome>,
+    /// Next periodic-check instant (Stage 7, spec §4.7): `None` when nothing is
+    /// pending — a `Never` interval, or the scheduled check that just fired.
+    /// Re-armed after a drained SCHEDULED outcome only; the forced button
+    /// never moves it (§4.7). `apply()` re-arms it from the APPLIED interval
+    /// (`schedule_after_apply`), so an interval switch takes effect live.
+    /// `logic` spawns the next check when the clock passes it and requests a
+    /// repaint no later than this instant.
+    next_check: Option<Instant>,
+    /// Whether the FIRST `logic` pass has armed the interval deadline: the
+    /// startup check is spawned by `main.rs` BEFORE the event loop, so the
+    /// interval clock starts on the first pass, not at app construction. The
+    /// arm runs BEFORE the outcome drain, so a startup outcome that drains on
+    /// that same pass still frees the slot (see [`check_in_flight_after`]).
+    deadline_armed: bool,
+    /// Whether ONE check is in flight (Stage 9, spec §4.7): scheduled or
+    /// forced. Set on spawn and recomputed once per pass by
+    /// [`check_in_flight_after`] — the drained outcome in `logic` is the only
+    /// thing that frees the slot. Gates the forced-check button
+    /// ([`check_now_button_enabled`]) and the scheduled spawn, so exactly one
+    /// check thread is live at a time.
+    check_in_flight: bool,
+    /// Whether the check currently in flight is the FORCED one: its drained
+    /// outcome must NOT re-arm or move the interval deadline (§4.7). The two
+    /// flags describe one slot — `check_in_flight` picks the gate, this one
+    /// picks the deadline rule.
+    forced_check_in_flight: bool,
+    /// Forced-check press recorded by the paint pass; `logic` spawns the check
+    /// and clears it. Paint never spawns threads, so the press is a record.
+    /// A press the busy slot cannot honor stays recorded (`forced_check_decision`)
+    /// and runs on the next pass, so a press is never silently dropped.
+    check_now_requested: bool,
+    /// The result line shown beside «Проверить обновления» (Stage 11
+    /// sub-item 2, spec §4.7): ONLY forced-check outcomes land here
+    /// (`forced_check_status_after`); scheduled results never touch it —
+    /// they keep using the chip and the General row. `None` before the
+    /// first forced check; while a forced check is in flight the paint
+    /// renders nothing (`forced_check_status_shown`) but keeps the slot.
+    forced_check_status: Option<ForcedCheckStatus>,
+    /// Shared install→restart flag (Stage 7, spec §5): created in `main.rs`
+    /// and set here when an install succeeds, together with
+    /// `ViewportCommand::Close`; `main.rs` drops the instance lock and spawns
+    /// the new binary once `run_native` returns.
+    restart_requested: Arc<AtomicBool>,
+    /// Install lifecycle shown by the General row and the dialog buttons
+    /// (see [`UpdateStatus`]).
+    update_status: UpdateStatus,
+    /// Install-thread result: exactly one `Result<(), String>` (verbatim
+    /// English `InstallError` text), drained once in `logic`; `None` while no
+    /// install thread is live.
+    install_rx: Option<mpsc::Receiver<Result<(), String>>>,
+    /// Update-dialog child viewport lifecycle (see [`UpdateDialogWindow`],
+    /// the exact About shape). Opened from the General row; NOT modal.
+    update_dialog: UpdateDialogWindow,
+    /// Slot the dialog paint records button presses into; `logic` gates them
+    /// with `dialog_outcome`. A fresh slot per open (like About's fresh close
+    /// flag) so a re-open never inherits a stale press.
+    dialog_outcome_slot: Arc<Mutex<Option<UpdateDialogButton>>>,
+    /// Release-notes hand-off, created ONLY when the dialog opens (lazy
+    /// fetch, spec §4.7) and dropped on close: a pending fetch thread's send
+    /// then lands on a closed receiver and is ignored (module contract), and
+    /// a re-open fetches fresh.
+    notes_rx: Option<mpsc::Receiver<Result<update_notes::ReleaseNotes, update_notes::NotesError>>>,
+    /// Arrived notes: `None` = fetch still pending (dialog paints the loading
+    /// hint). The `Arc` wrap is for the `'static` viewport callback, which
+    /// needs an owned snapshot — an O(1) refcount bump, not a deep copy.
+    notes: Option<Result<Arc<update_notes::ReleaseNotes>, update_notes::NotesError>>,
+    /// Markdown cache for the dialog notes — same Arc pattern as
+    /// `about_changelog_cache`: the viewport callback is `Send + Sync +
+    /// 'static`, and the `!Send` viewer is constructed per paint.
+    update_notes_cache: Arc<Mutex<egui_commonmark::CommonMarkCache>>,
 }
 
 impl SettingsApp {
@@ -1368,6 +2017,9 @@ impl SettingsApp {
         tray: Option<TrayController>,
         settings_mailbox: Arc<Mutex<Settings>>,
         pad_capture: PadCaptureMailbox,
+        update_rx: mpsc::Receiver<update::CheckOutcome>,
+        update_tx: mpsc::Sender<update::CheckOutcome>,
+        restart_requested: Arc<AtomicBool>,
     ) -> Self {
         Self {
             config_path,
@@ -1393,6 +2045,23 @@ impl SettingsApp {
                 Mutex::new(egui_commonmark::CommonMarkCache::default()),
             ),
             about_icon: None,
+            update: None,
+            update_rx: Some(update_rx),
+            update_tx,
+            next_check: None,
+            deadline_armed: false,
+            check_in_flight: false,
+            forced_check_in_flight: false,
+            check_now_requested: false,
+            forced_check_status: None,
+            restart_requested,
+            update_status: UpdateStatus::Idle,
+            install_rx: None,
+            update_dialog: UpdateDialogWindow::new(),
+            dialog_outcome_slot: Arc::new(Mutex::new(None)),
+            notes_rx: None,
+            notes: None,
+            update_notes_cache: Arc::new(Mutex::new(egui_commonmark::CommonMarkCache::default())),
         }
     }
 
@@ -1518,6 +2187,16 @@ impl SettingsApp {
             Err(err) => tracing::error!("Config save failed: {err}"),
         }
         self.applied = self.draft.clone();
+
+        // Background-check schedule (spec §4.7): the APPLIED interval governs
+        // the scheduled checks, so saving settings moves the deadline —
+        // `никогда` → a scheduled interval arms the schedule right away (no
+        // restart needed), an interval switch (1h→1d) re-arms to the NEW
+        // interval, and a switch to `никогда` clears an armed deadline so no
+        // extra check fires after checks were turned off. A check already in
+        // flight is left running: only the deadline changes here, never
+        // `check_in_flight`/`forced_check_in_flight` (`schedule_after_apply`).
+        self.next_check = schedule_after_apply(Instant::now(), self.applied.general.update_check);
 
         match &mut self.controller {
             Some(controller) => match controller.apply(self.draft.clone()) {
@@ -1883,6 +2562,145 @@ impl SettingsApp {
             );
             ui.label(rust_i18n::t!("general.webp_quality_label"));
         });
+
+        // ── «Обновление» group (spec §4.4/§4.7, task 2026-11-11 Stages 6-9) ──
+        // Draft edits participate in `is_dirty` (Settings derives PartialEq,
+        // so the General fields added by Stage 2 are covered by the existing
+        // machinery) and persist ONLY through `apply()` — no bypass. Behavior
+        // reads APPLIED settings (§4.4): an unsaved interval/channel switch
+        // cannot change checks, the row, or the install path until Apply.
+        ui.separator();
+        ui.label(rust_i18n::t!("update.section_title"));
+
+        egui::ComboBox::from_label(rust_i18n::t!("update.check_label"))
+            .selected_text(update_check_selected_text(general.update_check))
+            .show_ui(ui, |ui| {
+                // `Never` is a decision word — localized; the intervals are
+                // config literals shown verbatim, exactly like the Format
+                // dropdown's `png`/`jpg`/`webp` option labels.
+                ui.selectable_value(
+                    &mut general.update_check,
+                    config::UpdateCheck::Never,
+                    rust_i18n::t!("general.update_check_never"),
+                );
+                ui.selectable_value(&mut general.update_check, config::UpdateCheck::Hour, "1h");
+                ui.selectable_value(&mut general.update_check, config::UpdateCheck::Day, "1d");
+                ui.selectable_value(&mut general.update_check, config::UpdateCheck::Week, "1w");
+            });
+
+        // Forced check (spec §4.7), under the interval dropdown: it ignores the
+        // interval — `Never` still checks — and never moves or re-arms the
+        // scheduled deadline. Paint records the press only; `logic` spawns the
+        // check with the APPLIED channel, so an unsaved channel switch cannot
+        // redirect it (§4.4). The button is disabled while a check is in flight.
+        // Stage 11 sub-item 2: the button and its RESULT line share one
+        // horizontal row — the line shows ONLY the last forced outcome: the
+        // localized «Обновлений нет» after an up-to-date check, or the
+        // verbatim English `UpdateError` Display after a failure (never
+        // localized, `capture::error_display` precedent, in the same warning
+        // styling as the install-failure hint). Scheduled results keep using
+        // the chip and the General row; nothing renders while a forced check
+        // is in flight (`forced_check_status_shown`).
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    check_now_button_enabled(self.check_in_flight),
+                    egui::Button::new(rust_i18n::t!("update.check_now_button")),
+                )
+                .clicked()
+            {
+                self.check_now_requested = true;
+            }
+            if let Some(status) = forced_check_status_shown(
+                self.forced_check_status.as_ref(),
+                self.forced_check_in_flight,
+            ) {
+                match status {
+                    // Technical failure text stays English verbatim (no
+                    // locale key) and shares the warning styling of
+                    // `install_failure_hint` below.
+                    ForcedCheckStatus::Failed(message) => {
+                        ui.label(
+                            egui::RichText::new(message.as_str())
+                                .color(WARNING_COLOR)
+                                .strong(),
+                        );
+                    }
+                    // The success line is a plain localized result, not an error.
+                    ForcedCheckStatus::NoUpdates => {
+                        ui.label(rust_i18n::t!("update.no_updates_available"));
+                    }
+                }
+            }
+        });
+
+        egui::ComboBox::from_label(rust_i18n::t!("general.update_channel_label"))
+            .selected_text(match general.update_channel {
+                config::UpdateChannel::Stable => "stable",
+                config::UpdateChannel::Nightly => "nightly",
+            })
+            .show_ui(ui, |ui| {
+                // Channel values are release-tag names — config literals, not
+                // decision words, so `stable`/`nightly` stay unlocalized.
+                ui.selectable_value(
+                    &mut general.update_channel,
+                    config::UpdateChannel::Stable,
+                    "stable",
+                );
+                ui.selectable_value(
+                    &mut general.update_channel,
+                    config::UpdateChannel::Nightly,
+                    "nightly",
+                );
+            });
+
+        ui.checkbox(
+            &mut general.auto_install,
+            rust_i18n::t!("general.auto_install_label"),
+        );
+
+        // «Update available» row (spec §4.7): the dialog-path UI. With
+        // auto-install ON a discovery never sits held — install starts at
+        // discovery — so this row is what the OFF path offers: open the
+        // update dialog while Idle, read the verbatim failure text after a
+        // failed install, and stay disabled while Installing. Visibility is
+        // `update_row_visible` (a held discovery is enough): a discovery can
+        // come from the forced check, which works with ANY interval (§4.7), so
+        // neither the interval nor dev-ness gates the row anymore.
+        if update_row_visible(self.update.as_ref()) {
+            let version = self
+                .update
+                .as_ref()
+                .map(|info| info.version.as_str())
+                .unwrap_or("");
+            let failure = install_failure_hint(&self.update_status).map(str::to_owned);
+            let enabled = install_button_enabled(&self.update_status);
+            let mut open_dialog = false;
+            ui.horizontal(|ui| {
+                ui.label(rust_i18n::t!("general.update_available_label"));
+                ui.label(version);
+                match failure {
+                    // A failed install replaces the button with the verbatim
+                    // English error text (no locale key for technical
+                    // failures) in the warning color already used for status
+                    // icons — the message itself is the evidence.
+                    Some(message) => {
+                        ui.label(egui::RichText::new(message).color(WARNING_COLOR).strong());
+                    }
+                    None => {
+                        open_dialog = ui
+                            .add_enabled(
+                                enabled,
+                                egui::Button::new(rust_i18n::t!("general.install_update_button")),
+                            )
+                            .clicked();
+                    }
+                }
+            });
+            if open_dialog {
+                self.open_update_dialog();
+            }
+        }
     }
 
     /// Browse → native folder picker (spec §4.4, `rfd` approved by the user
@@ -2169,6 +2987,87 @@ impl SettingsApp {
         }
         tracing::info!("Overlay test toast shown: {text} (no file written)");
     }
+
+    /// Open the update dialog from the General row (spec §4.7): exactly the
+    /// About lazy pattern — fresh close flag, fresh outcome slot, and the
+    /// notes fetch thread is spawned HERE and nowhere else (a background
+    /// check never pays for notes nobody reads). Re-opening an open dialog
+    /// is a no-op (`UpdateDialogWindow::open` returns false).
+    fn open_update_dialog(&mut self) {
+        if !self.update_dialog.open() {
+            return;
+        }
+        self.dialog_outcome_slot = Arc::new(Mutex::new(None));
+        self.notes = None;
+        let (tx, rx) =
+            mpsc::channel::<Result<update_notes::ReleaseNotes, update_notes::NotesError>>();
+        self.notes_rx = Some(rx);
+        // Notes fetch (Stage 7 seam re-point, spec §4.7): the seam is
+        // `Fn(&str) -> Result<ReleaseNotes, NotesError>`, so the production
+        // fetcher is `update_notes::fetch_release_notes` itself — fetch AND
+        // parse belong to `update_notes`, and this wiring point passes the fn
+        // item with no error mapping (SRP: `update` owns the `release.yaml`
+        // contract, `update_notes` owns the GitHub Releases API contract).
+        update_notes::spawn_notes_fetch(
+            self.applied.general.update_channel,
+            tx,
+            update_notes::fetch_release_notes,
+        );
+    }
+
+    /// Close the dialog from the Cancel button (an OS close goes through
+    /// `observe_close` in `logic` instead): stop registration next pass —
+    /// egui GCs the viewport and eframe drops the `Arc<Window>` — and drop
+    /// the notes state, so a still-pending fetch send is ignored by the
+    /// closed receiver (module contract) and a re-open fetches fresh.
+    fn dismiss_update_dialog(&mut self) {
+        self.update_dialog.close();
+        self.notes_rx = None;
+        self.notes = None;
+    }
+
+    /// Start the install path (spec §4.7 — auto-install on discovery or a
+    /// dialog Install press): ONE plain std thread (repo thread model, no
+    /// async) running `update_install::install` with
+    /// `self_replace::self_replace` as the replace seam. The single result
+    /// arrives over a dedicated channel drained in `logic`; nothing here
+    /// restarts or exits — `RestartPending` is the Stage 7 seam (see
+    /// [`install_finished`]).
+    fn start_install(&mut self, info: update::UpdateInfo) {
+        let (tx, rx) = mpsc::channel::<Result<(), String>>();
+        self.install_rx = Some(rx);
+        self.update_status = UpdateStatus::Installing;
+        std::thread::spawn(move || {
+            // `InstallError`'s Display text travels verbatim: the row and
+            // the danger chip show the real OS/network failure wording,
+            // exactly as `capture::chip_text` does for capture failures.
+            // A closure (not the bare fn item) is required here: `install`'s
+            // replace seam is higher-ranked (`for<'a> Fn(&'a Path)`), and a
+            // generic fn item instantiated at the call site is specialized to
+            // one lifetime — the closure stays generic over the argument.
+            let outcome = update_install::install(&info, |path| self_replace::self_replace(path))
+                .map_err(|err| err.to_string());
+            let _ = tx.send(outcome);
+        });
+    }
+
+    /// Publish an update chip through the SAME hand-off slot real saves use
+    /// (spec §4.3): the handle never blocks, and the chip spawns on the next
+    /// `overlay_host.update` pass in `logic`. A missing handle (no toast
+    /// service) or a closed channel is WARNed, never fatal (spec §5) — the
+    /// update result itself is what app state keeps.
+    fn publish_update_chip(&self, chip: Toast) {
+        let Some(handle) = capture::handoff_handle(&self.handoff) else {
+            tracing::warn!("Update chip skipped: no toast handle attached");
+            return;
+        };
+        let text = chip.text.clone(); // `show` consumes the chip; the log quotes it
+        if let Err(err) = handle.show(chip) {
+            tracing::warn!("Update chip failed: {err}");
+            return;
+        }
+        tracing::info!("Update chip shown: {text}");
+    }
 }
 
 impl eframe::App for SettingsApp {
@@ -2293,27 +3192,322 @@ impl eframe::App for SettingsApp {
             }
         }
 
-        if ctx.input(|i| i.viewport().close_requested()) {
-            match close_decision(self.exit_requested, self.close_for_exit) {
-                CloseAction::Exit => {
-                    // Tray `Exit` or an OK/Cancel button: no CancelClose this
-                    // pass → eframe shuts down, `run_native` returns, the
-                    // process exits 0.
-                    tracing::info!(
-                        "virshot exiting: {}",
-                        if self.exit_requested {
-                            "tray menu"
-                        } else {
-                            "settings window button"
-                        }
-                    );
+        // ── Auto-update (task 2026-11-11_auto-update, Stages 6-9, spec §4.7) ──
+        // ONE clock read per pass: the deadline arming below, the drain, the
+        // deadline comparison and the repaint request all share it.
+        let now = Instant::now();
+        // Interval scheduling (Stage 7, spec §4.7): the deadline is armed on the
+        // FIRST pass — the startup check was spawned by `main.rs` before the
+        // event loop — and re-armed after every drained SCHEDULED outcome, so
+        // the next check follows the interval the settings publish rather than
+        // the request that produced the outcome. Dev builds schedule on the
+        // same terms as release builds; only `Never` yields `None` from
+        // `update::next_check_deadline`.
+        //
+        // Arming runs BEFORE the drain: on the first pass an armed deadline
+        // means the startup check is in flight (both are the same interval
+        // gate), and a startup outcome that drains on that same pass — a fast
+        // failure such as an HTTP 404, or a slow window init — must free the
+        // slot. Arming after the drain put the flag back ON after the outcome
+        // was already drained and nothing cleared it again: no scheduled check
+        // ever fired and «Проверить обновления» stayed disabled all session.
+        let armed_this_pass = !self.deadline_armed;
+        if armed_this_pass {
+            self.deadline_armed = true;
+            self.next_check =
+                update::next_check_deadline(now, self.applied.general.update_check.interval());
+        }
+
+        // Drain background-check outcomes: they are the source state for the
+        // row, the dialog, and the install path. A FAILED scheduled CHECK is a
+        // log line only — the scheduled check below retries it on the next
+        // interval. An UP-TO-DATE outcome RESETS the held discovery (Stage 11
+        // sub-item 4: a check outcome replaces the previous result — see
+        // `discovery_cleared_by_check_outcome`). The latest held discovery
+        // wins if several arrive in one pass.
+        let mut discovery: Option<update::UpdateInfo> = None;
+        let mut outcome_drained = false;
+        // The slot holds exactly one in-flight check, so its forced flag
+        // decides the result line AND the reset rule for every outcome this
+        // pass drains (sub-items 2+4).
+        let forced_check = self.forced_check_in_flight;
+        if let Some(rx) = &self.update_rx {
+            while let Ok(outcome) = rx.try_recv() {
+                outcome_drained = true;
+                // Sub-item 2: a FORCED outcome REPLACES the beside-button
+                // line; a scheduled outcome leaves the slot untouched.
+                self.forced_check_status = forced_check_status_after(
+                    self.forced_check_status.take(),
+                    &outcome,
+                    forced_check,
+                );
+                // Sub-item 4: stale-discovery reset, wired through the pure
+                // helper so the rule is unit-testable without a Context.
+                if discovery_cleared_by_check_outcome(&outcome, forced_check, &self.update_status) {
+                    self.update = None;
                 }
-                CloseAction::HideToTray => {
-                    // Plain window close (the X button): hide to the tray and
-                    // discard the draft — the process stays resident (§4.5).
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    self.draft = self.applied.clone();
+                match outcome {
+                    update::CheckOutcome::Updated(info) => discovery = Some(info),
+                    update::CheckOutcome::UpToDate => {}
+                    update::CheckOutcome::Failed(err) => {
+                        tracing::warn!("update check failed: {err}");
+                    }
+                }
+            }
+        }
+        if let Some(info) = discovery {
+            // Stage 7 (§4.7): a NEW discovery while an install FAILURE is
+            // displayed puts the row back to Idle — `status_after_new_discovery`
+            // — so Install is offered again instead of keeping the stale
+            // failure error text. One clone: the state is read again by the
+            // row and dialog passes later in this function.
+            self.update_status = status_after_new_discovery(self.update_status.clone());
+            // Success-style chip, overlay-enabled gate only (§4.3 — the same
+            // suppression save toasts use). The chip text is built before
+            // `info` moves into the install/discovery path.
+            if update_toast_enabled(Some(&info), self.applied.overlay.enabled) {
+                let chip = update_discovery_chip(&self.applied.overlay, &info);
+                self.publish_update_chip(chip);
+            }
+            if auto_install_on_discovery(true, self.applied.general.auto_install) {
+                // Auto-install ON (§4.7): straight to the install path — no
+                // dialog, no row; the discovery is never held.
+                self.start_install(info);
+            } else {
+                // Dialog path: the General row shows the discovery until an
+                // install succeeds (or checks are switched off).
+                self.update = Some(info);
+            }
+            ctx.request_repaint();
+        }
+        // Any drained outcome — Updated, UpToDate, or Failed — ends the check
+        // that produced it, so the forced-check button is enabled again (§4.7).
+        // Only a SCHEDULED outcome re-arms the interval deadline; a FORCED
+        // outcome must not move it (`deadline_rearmed_by_outcome`, §4.7).
+        if outcome_drained {
+            if deadline_rearmed_by_outcome(self.forced_check_in_flight) {
+                self.next_check =
+                    update::next_check_deadline(now, self.applied.general.update_check.interval());
+            }
+            self.forced_check_in_flight = false;
+        }
+        // The single in-flight slot is decided in ONE place, after the arm and
+        // the drain, so the first-pass arm cannot re-occupy a slot the drain
+        // just freed (see [`check_in_flight_after`]). Exactly one check is in
+        // flight at a time, and the deadline consumes only while it is free.
+        self.check_in_flight = check_in_flight_after(
+            self.check_in_flight,
+            outcome_drained,
+            if armed_this_pass {
+                self.next_check
+            } else {
+                None
+            },
+        );
+        // Scheduled check. A deadline that arrives while a FORCED check is
+        // running is not consumed: it fires on the next pass, once the forced
+        // outcome drains, so exactly one check thread is live at a time.
+        if let Some(deadline) = self.next_check
+            && now >= deadline
+            && !self.check_in_flight
+        {
+            self.next_check = None;
+            self.check_in_flight = true;
+            // The Sender clone is the thread boundary: `spawn_check` moves an
+            // owned sender into its thread while app state keeps its own for
+            // the next deadline (O(1) clone, no `Arc`).
+            update::spawn_check(
+                self.applied.general.update_channel,
+                update::current_build(),
+                self.update_tx.clone(),
+                update::fetch_manifest_text,
+            );
+        }
+        // Forced check (Stage 9, spec §4.7): the press the paint pass recorded.
+        // The interval is IGNORED — `Never` checks too — and the scheduled
+        // deadline is neither moved nor re-armed. `Never` schedules nothing, so
+        // this button is the only check path that setting has. A press the busy
+        // slot cannot honor stays RECORDED rather than dropped: a scheduled
+        // spawn that took the slot on this very pass must not swallow it — the
+        // forced check runs on the next pass, once the slot frees (the tray tick
+        // keeps logic passes coming, so no extra repaint is needed).
+        let forced = forced_check_decision(
+            self.applied.general.update_check,
+            self.check_now_requested,
+            self.check_in_flight,
+        );
+        if forced.spawn {
+            self.check_now_requested = false;
+            self.check_in_flight = true;
+            self.forced_check_in_flight = true;
+            update::spawn_check(
+                self.applied.general.update_channel,
+                update::current_build(),
+                self.update_tx.clone(),
+                update::fetch_manifest_text,
+            );
+        }
+        if forced.pending {
+            tracing::debug!("forced check deferred: a check is already in flight");
+        }
+
+        // Install-thread result (exactly one per install): transition the
+        // shared state through the pure decision functions so the row and
+        // dialog reflect it.
+        if let Some(rx) = &self.install_rx
+            && let Ok(outcome) = rx.try_recv()
+        {
+            self.install_rx = None;
+            self.update_status = install_finished(&outcome);
+            self.update = update_info_after_install(self.update.take(), outcome.is_ok());
+            match &outcome {
+                Ok(()) => {
+                    // Stage 7 (spec §5): the binary IS replaced, so this
+                    // process must run the new one. `restart_requested` marks
+                    // the shutdown as an explicit EXIT (the close flow below
+                    // never cancels it), and the viewport close makes
+                    // `run_native` return; `main.rs` drops the instance lock,
+                    // spawns the new binary, and exits 0. Startup cleanup of
+                    // self-replace leftovers happens on EVERY start there.
+                    tracing::info!("update installed: restart pending");
+                    self.restart_requested.store(true, Ordering::Relaxed);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(message) => {
+                    tracing::warn!("update install failed: {message}");
+                    // Danger chip ALWAYS shown (§4.3: failures ignore the
+                    // overlay toggle), with the verbatim English text.
+                    self.publish_update_chip(update_failure_chip(&self.applied.overlay, message));
+                }
+            }
+            ctx.request_repaint();
+        }
+
+        // Notes hand-off, drained only while the dialog is open (the
+        // receiver is created on open and dropped on close); exactly one
+        // value ever arrives.
+        if let Some(rx) = &self.notes_rx
+            && let Ok(outcome) = rx.try_recv()
+        {
+            self.notes_rx = None;
+            self.notes = Some(match outcome {
+                Ok(notes) => Ok(Arc::new(notes)),
+                Err(err) => Err(err),
+            });
+        }
+
+        // Update dialog: the exact About child-viewport lifecycle — an OS
+        // close request is recorded by the CHILD pass into the shared flag,
+        // this pass stops registration, and egui GCs the viewport (eframe
+        // drops the `Arc<Window>`). The Cancel button reaches the same end
+        // via `dismiss_update_dialog`. Closing also drops the notes state
+        // (a pending fetch send is ignored by the closed receiver).
+        if self.update_dialog.observe_close() {
+            self.dismiss_update_dialog();
+        }
+        if self.update_dialog.wants_registration() {
+            let update_viewport = egui::ViewportId::from_hash_of("virshot-update");
+            if let Some(close_flag) = self.update_dialog.close_flag() {
+                // Owned snapshots for the `'static` callback: two O(1) Arc
+                // bumps (cache, outcome slot), one Option clone of notes
+                // (Arc bump inside) and one of the small discovery summary
+                // and install status — the callback cannot borrow app state.
+                let cache = Arc::clone(&self.update_notes_cache);
+                let slot = Arc::clone(&self.dialog_outcome_slot);
+                let notes = self.notes.clone();
+                let info = self.update.clone();
+                let channel = self.applied.general.update_channel; // Copy
+                let status = self.update_status.clone();
+                // Same chrome policy as About (task 2026-11-10): title bar +
+                // close button + resizable, NO minimize/maximize.
+                let chrome = crate::about::window_chrome();
+                ctx.show_viewport_deferred(
+                    update_viewport,
+                    egui::ViewportBuilder::default()
+                        .with_title(rust_i18n::t!("update.dialog_title"))
+                        .with_inner_size([480.0, 360.0])
+                        .with_decorations(chrome.decorations)
+                        .with_resizable(chrome.resizable)
+                        .with_close_button(chrome.close_button)
+                        .with_minimize_button(chrome.minimize_button)
+                        .with_maximize_button(chrome.maximize_button),
+                    move |ui, _class| {
+                        paint_update_dialog(
+                            ui,
+                            &mut cache
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                            &close_flag,
+                            &slot,
+                            &UpdateDialogView {
+                                notes: notes.as_ref(),
+                                info: info.as_ref(),
+                                channel,
+                                status: &status,
+                            },
+                        );
+                    },
+                );
+                // A hidden settings window still repaints this viewport on
+                // its own schedule; nudge it so notes arrival lands promptly.
+                ctx.request_repaint_of(update_viewport);
+            }
+            // Presses recorded by the CHILD pass of the previous frame (the
+            // child pass runs BEFORE the root pass — same one-frame ordering
+            // as the About close flag): gate them against CURRENT state.
+            let pressed = self
+                .dialog_outcome_slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(button) = pressed {
+                match dialog_outcome(button, &self.update_status, self.update.as_ref()) {
+                    Some(UpdateDialogOutcome::Dismiss) => {
+                        self.dismiss_update_dialog();
+                    }
+                    Some(UpdateDialogOutcome::Install(info)) => {
+                        self.dismiss_update_dialog();
+                        self.start_install(info);
+                    }
+                    // `None`: an Install press the current state rejects (the
+                    // button is disabled anyway) — dialog stays open, effect
+                    // nothing.
+                    None => {}
+                }
+            }
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.restart_requested.load(Ordering::Relaxed) {
+                // Stage 7 (spec §5): this Close request is the one the install
+                // success sent above — an explicit EXIT, never cancelled, so
+                // `run_native` returns and `main.rs` drops the instance lock,
+                // spawns the new binary, and exits 0. An X-button close while
+                // a restart is pending exits too: the installed binary has to
+                // run either way, and hiding would keep the old one alive.
+                tracing::info!("virshot exiting: update installed, restarting");
+            } else {
+                match close_decision(self.exit_requested, self.close_for_exit) {
+                    CloseAction::Exit => {
+                        // Tray `Exit` or an OK/Cancel button: no CancelClose this
+                        // pass → eframe shuts down, `run_native` returns, the
+                        // process exits 0.
+                        tracing::info!(
+                            "virshot exiting: {}",
+                            if self.exit_requested {
+                                "tray menu"
+                            } else {
+                                "settings window button"
+                            }
+                        );
+                    }
+                    CloseAction::HideToTray => {
+                        // Plain window close (the X button): hide to the tray and
+                        // discard the draft — the process stays resident (§4.5).
+                        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        self.draft = self.applied.clone();
+                    }
                 }
             }
         }
@@ -2364,6 +3558,13 @@ impl eframe::App for SettingsApp {
         // window is hidden. The toast service wakes the same context on its
         // fade ticks.
         ctx.request_repaint_after(TRAY_POLL_TICK);
+        // A pending check deadline needs a pass AT the deadline instant, even
+        // while the window is hidden: requesting the shorter of the two waits
+        // keeps the tray tick alive and bounds the check drift to this tick
+        // (`egui` keeps the earliest scheduled repaint, so this is additive).
+        if let Some(deadline) = self.next_check {
+            ctx.request_repaint_after(deadline.saturating_duration_since(now).min(TRAY_POLL_TICK));
+        }
     }
 
     /// Alpha-0 clear so transparent windows show through (eframe's glow backend
@@ -2581,7 +3782,13 @@ fn app_window_icon() -> Option<Arc<egui::IconData>> {
 /// after a logged tray failure; `settings_mailbox` is the settings mailbox
 /// `main` created for the hotkey listener and the pad pump (Apply publishes
 /// it), and `pad_capture` is the pad-capture mailbox shared with the pump
-/// (§4.4, Stage 5). Returns only if graphics setup failed; the caller falls
+/// (§4.4, Stage 5). `update_tx`/`update_rx` are the check channel `main.rs`
+/// created (Stage 7 ownership — the GUI does not create one): the Receiver is
+/// drained ONLY in `App::logic`, and the Sender is what scheduled check
+/// threads send on. `restart_requested` is the shared install→restart flag:
+/// `App::logic` sets it and closes the viewport when an install succeeds, so
+/// this call returns and `main.rs` restarts the new binary (spec §5).
+/// Returns only if graphics setup failed; the caller falls
 /// back to the idle loop so the process stays resident (spec §5). The toast
 /// stack is owned by the app, so it lives for the whole loop and drops with it.
 #[allow(clippy::too_many_arguments)] // Startup wiring: one call site in `main`, each shared
@@ -2595,6 +3802,9 @@ pub(crate) fn run(
     tray: Option<TrayController>,
     settings_mailbox: Arc<Mutex<Settings>>,
     pad_capture: PadCaptureMailbox,
+    update_tx: mpsc::Sender<update::CheckOutcome>,
+    update_rx: mpsc::Receiver<update::CheckOutcome>,
+    restart_requested: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     let viewport = egui::ViewportBuilder::default()
         .with_title(rust_i18n::t!("bottom.window_title"))
@@ -2672,6 +3882,12 @@ pub(crate) fn run(
                 tray,
                 settings_mailbox,
                 pad_capture,
+                // The check channel `main.rs` created (Stage 7): drained ONLY
+                // in `App::logic`; the sender drives the interval checks that
+                // pass schedules (spec §4.7).
+                update_rx,
+                update_tx,
+                restart_requested,
             );
             app.warning_icon = warning_icon_texture(&cc.egui_ctx);
             // Bind-probe wake (Stage 14): the listener thread records a probe

@@ -95,6 +95,9 @@ mod instance;
 mod logging;
 mod template;
 mod tray;
+mod update;
+mod update_install;
+mod update_notes;
 
 use chrono::Local;
 use clap::Parser;
@@ -107,6 +110,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 
 use crate::capture::CaptureCommand;
 use crate::capture::CaptureMode;
@@ -132,6 +136,31 @@ static RESIDENT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// logging (`logging` has no shutdown hook): headless `run_shot` and the
 /// resident guard-failure exit.
 const LOG_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Startup-check decision (spec §4.7, Stages 7-9): a background check runs at
+/// startup ONLY when checks are scheduled (`update_check != Never`). Dev builds
+/// are NOT excluded — a `-dev` build checks updates on the same terms as a
+/// release build: `update::decide_update` ships an update iff the release
+/// `releaseDate` is newer than the embedded build time OR the release VERSION
+/// is higher, so `commit_sha` is no longer a decision input (Stage 11).
+/// `is_dev` is still passed by callers so the build kind is stated at the call
+/// site, but no longer changes the decision.
+/// `arm_startup_check` applies it on both resident paths; the interval checks
+/// live in `gui::App::logic` (GUI) and in `park_without_gui` (GUI-less).
+fn should_check_at_startup(interval: config::UpdateCheck, _is_dev: bool) -> bool {
+    interval != config::UpdateCheck::Never
+}
+
+/// Decision behind the restart spawn-failure fallback (spec §5 open question):
+/// a re-taken instance lock keeps THIS process resident (`None` — no exit
+/// code), an unusable lock ends the run with a typed failure.
+fn restart_after_failed_spawn(lock_reacquired: bool) -> Option<ExitCode> {
+    if lock_reacquired {
+        None
+    } else {
+        Some(ExitCode::FAILURE)
+    }
+}
 
 /// CLI surface (spec §8). The global options are accepted before or after the
 /// subcommand.
@@ -228,6 +257,30 @@ fn main() -> ExitCode {
         eprintln!("Logging unavailable: {err}");
     }
     tracing::info!("virshot starting; logging to {}", log_path.display());
+
+    // Startup update cleanup (spec §4.7, Stage 7): leftovers of a previous
+    // self-replace and stale `virshot-update-*` install dirs are removed on
+    // EVERY start — before the shot/resident dispatch, so the headless CLI
+    // path cleans too (it never touches the network). `--version` above exits
+    // before logging and is deliberately excluded: it prints metadata and
+    // performs no filesystem work. `cleanup_leftovers` never fails — a missing
+    // directory is ignored, other I/O failures are logged there and startup
+    // continues — so an unresolvable exe path scans the temp dir twice (the
+    // exe-dir pass is a cheap no-op) instead of skipping the cleanup.
+    let temp_dir = std::env::temp_dir();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_owned));
+    let removed = match exe_dir.as_deref() {
+        Some(dir) => update_install::cleanup_leftovers(dir, &temp_dir),
+        None => update_install::cleanup_leftovers(&temp_dir, &temp_dir),
+    };
+    if !removed.is_empty() {
+        tracing::info!(
+            "Startup update cleanup: {} leftover file(s) removed",
+            removed.len()
+        );
+    }
 
     match cli.command {
         Some(Command::Shot {
@@ -358,7 +411,8 @@ fn apply_out_override(general: &mut General, out: &Path) -> bool {
 /// ERROR log and the app keeps running without a tray. If the GUI cannot
 /// open, the main thread parks on an idle sleep tick that still polls the
 /// tray — the process stays resident rather than exiting (spec §5), and
-/// tray `Exit` ends the park loop (exit 0).
+/// tray `Exit` ends the park loop (exit 0). A successful update install closes
+/// the window and the tail restarts the new binary (Stage 7, spec §5).
 fn run_resident(config_path: &Path) -> ExitCode {
     let settings = config::load_or_create(config_path);
     // Locale for the resident UI (spec §2): set right after the config load
@@ -377,9 +431,10 @@ fn run_resident(config_path: &Path) -> ExitCode {
     // hotkeys, and GUI — and held for the whole process lifetime, so `Drop`
     // removes the lock on every exit path (GUI shutdown and the park-loop
     // exit). A lock held by a live process ends startup before anything is
-    // built: typed ERROR + exit 1.
-    let _guard = match instance::InstanceGuard::acquire(config_path) {
-        Ok(guard) => guard,
+    // built: typed ERROR + exit 1. Held in a slot (Stage 7): the restart
+    // sequence drops it deliberately BEFORE spawning the new process.
+    let mut guard_slot = match instance::InstanceGuard::acquire(config_path) {
+        Ok(guard) => Some(guard),
         Err(err) => {
             tracing::error!("virshot cannot start: {err}");
             // Startup init: no window or tray exists to report through.
@@ -448,6 +503,17 @@ fn run_resident(config_path: &Path) -> ExitCode {
         }
     };
 
+    // Auto-update channel (Stage 7 ownership): `main` creates the pair and
+    // hands BOTH halves to the GUI — `gui::run` does not create its own. The
+    // Receiver is drained ONLY in `App::logic` (the sole drain point); the
+    // Sender is moved into the GUI, which clones it per scheduled check (an
+    // O(1) clone, no `Arc`). `restart_requested` is the install→restart flag:
+    // the GUI sets it when an install replaces the binary and asks the
+    // viewport to close; the tail below runs the restart (spec §5).
+    let (update_tx, update_rx) = mpsc::channel::<update::CheckOutcome>();
+    let restart_requested = Arc::new(AtomicBool::new(false));
+    arm_startup_check(&settings, &update_tx);
+
     tracing::info!("Settings window opening");
     if let Err(err) = gui::run(
         config_path.to_owned(),
@@ -458,17 +524,130 @@ fn run_resident(config_path: &Path) -> ExitCode {
         tray.clone(),
         Arc::clone(&settings_mailbox),
         Arc::clone(&pad_capture),
+        update_tx,
+        update_rx,
+        Arc::clone(&restart_requested),
     ) {
         tracing::error!("GUI failed: {err}");
         tracing::info!("virshot idle: running without GUI");
         // No GUI means no toast service: the slot stays empty and captures
         // log instead of showing a chip.
-        park_without_gui(tray, settings, handoff);
-        return ExitCode::SUCCESS;
+        // The failed GUI attempt consumed the startup channel's receiver with
+        // the app it never got to run, so the park loop owns a fresh pair —
+        // it drains its own checks (there is no `App::logic` on this path).
+        let (park_tx, park_rx) = mpsc::channel::<update::CheckOutcome>();
+        arm_startup_check(&settings, &park_tx);
+        park_without_gui(
+            tray.as_ref(),
+            &settings,
+            &handoff,
+            park_tx,
+            park_rx,
+            &restart_requested,
+        );
     }
-    // `run_native` only returns on real shutdown (tray Exit) or startup
-    // failure; a clean shutdown exits 0.
+    // Restart tail (spec §5, Stage 7). An install success set `restart_requested`
+    // and closed the window: drop the lock, spawn the new binary, exit 0. A
+    // failed spawn re-took the lock (see `restart_for_update`) — this process
+    // stays resident via the park loop and exits 0 later, so the installed
+    // binary runs at the next start. Without the flag this is a clean
+    // shutdown: the guard drops HERE, removing the lock, and the run exits 0.
+    if let Some(code) =
+        restart_if_update_requested(config_path, &mut guard_slot, &restart_requested)
+    {
+        return code;
+    }
+    if restart_requested.load(Ordering::Relaxed) {
+        tracing::info!(
+            "virshot idle: restart abandoned, staying resident — the installed binary runs at the next start"
+        );
+        let (retry_tx, retry_rx) = mpsc::channel::<update::CheckOutcome>();
+        arm_startup_check(&settings, &retry_tx);
+        park_without_gui(
+            tray.as_ref(),
+            &settings,
+            &handoff,
+            retry_tx,
+            retry_rx,
+            &restart_requested,
+        );
+    }
     ExitCode::SUCCESS
+}
+
+/// Arm the startup background check on `sender` when the settings say so
+/// (spec §4.7): one call site per resident path (GUI, park), so the decision
+/// and the spawn live in one place. The Sender clone is O(1) — `spawn_check`
+/// moves an owned sender into its thread while the caller keeps its own.
+fn arm_startup_check(settings: &Settings, sender: &mpsc::Sender<update::CheckOutcome>) {
+    let build = update::current_build();
+    if should_check_at_startup(settings.general.update_check, build.is_dev()) {
+        update::spawn_check(
+            settings.general.update_channel,
+            build,
+            sender.clone(),
+            update::fetch_manifest_text,
+        );
+    }
+}
+
+/// The restart sequence after a successful install (spec §5, Stage 7): FIRST
+/// the guard in `guard_slot` is dropped — `InstanceGuard::Drop` removes
+/// `<config>.lock`, so the NEW process can take the lock and the pid probe
+/// must not see this one; the ordering is load-bearing, hence the guard is
+/// moved out and dropped before the spawn, not after. THEN `current_exe()` is
+/// spawned — the freshly replaced binary — the log writer gets the same
+/// bounded drain a `shot` run does, and the run exits 0 (the new process is
+/// the app now).
+/// On a spawn FAILURE the old process must stay alive and guarded (spec §5
+/// open question): the fresh guard is written back into `guard_slot` and the
+/// decision is delegated to [`restart_after_failed_spawn`].
+fn restart_for_update(
+    config_path: &Path,
+    guard_slot: &mut Option<instance::InstanceGuard>,
+) -> Option<ExitCode> {
+    drop(guard_slot.take());
+    match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+        Ok(_child) => {
+            tracing::info!("Restarting for update: new process spawned");
+            std::thread::sleep(LOG_DRAIN_GRACE);
+            Some(ExitCode::SUCCESS)
+        }
+        Err(err) => {
+            tracing::error!("Restart for update failed: {err}");
+            let reacquired = match instance::InstanceGuard::acquire(config_path) {
+                Ok(guard) => {
+                    // Owned by the caller's slot now: this process keeps the
+                    // lock and stays resident (no exit — see
+                    // `restart_after_failed_spawn`).
+                    *guard_slot = Some(guard);
+                    tracing::info!("Instance lock re-acquired; virshot stays resident");
+                    true
+                }
+                Err(reacquire_err) => {
+                    tracing::error!("Cannot re-acquire the instance lock: {reacquire_err}");
+                    false
+                }
+            };
+            restart_after_failed_spawn(reacquired)
+        }
+    }
+}
+
+/// Restart ONLY when an install asked for it (spec §5). Returns `Some(code)`
+/// when the restart ran (spawn + exit 0) or when the lock could not be
+/// re-taken (exit 1); `None` for a clean shutdown and for the spawn-failure
+/// fallback where this process re-took the lock — the caller then parks.
+fn restart_if_update_requested(
+    config_path: &Path,
+    guard_slot: &mut Option<instance::InstanceGuard>,
+    restart_requested: &AtomicBool,
+) -> Option<ExitCode> {
+    if restart_requested.load(Ordering::Relaxed) {
+        restart_for_update(config_path, guard_slot)
+    } else {
+        None
+    }
 }
 
 /// GUI-failure fallback (spec §5): park the MAIN thread and still serve the
@@ -479,9 +658,98 @@ fn run_resident(config_path: &Path) -> ExitCode {
 /// window to show — the GUI failure was logged above); `Exit` sets
 /// [`RESIDENT_SHUTDOWN`] and the
 /// loop returns, so the process exits 0 — the only exit path without a GUI.
-fn park_without_gui(tray: Option<tray::TrayController>, settings: Settings, handoff: ToastHandoff) {
+///
+/// Stage 7 update plumbing (spec §4.7, §5): this loop is the DRAIN POINT of
+/// its own channel — there is no `App::logic` without a GUI. Every tick
+/// drains `update_rx`: a `Updated` outcome installs immediately when
+/// `general.auto_install` is ON (one plain `std` thread, its result drained on
+/// a second channel), and with the flag OFF the discovery is an INFO log ONLY
+/// — no window, no toast (§5). `Failed` is a WARN, `UpToDate` a debug line. A
+/// successful install sets [`RESIDENT_SHUTDOWN`] (the loop returns) and
+/// `restart_requested` (so `run_resident` runs the restart sequence). Checks
+/// re-spawn on the interval deadline; only `Never` schedules nothing — dev
+/// builds schedule on the same terms as release builds, mirroring
+/// `gui::App::logic`. The forced «Проверить обновления» button is a GUI
+/// affordance (§4.7), so this path has no forced-check entry.
+fn park_without_gui(
+    tray: Option<&tray::TrayController>,
+    settings: &Settings,
+    handoff: &ToastHandoff,
+    update_tx: mpsc::Sender<update::CheckOutcome>,
+    update_rx: mpsc::Receiver<update::CheckOutcome>,
+    restart_requested: &AtomicBool,
+) {
+    let build = update::current_build();
+    let interval = settings.general.update_check.interval();
+    let mut next_check = update::next_check_deadline(std::time::Instant::now(), interval);
+    let mut install_rx: Option<mpsc::Receiver<Result<(), String>>> = None;
     while !RESIDENT_SHUTDOWN.load(Ordering::Relaxed) {
-        if let Some(tray) = &tray {
+        // Check outcomes: drained here, newest wins. Checks never overlap:
+        // the spawn below only happens once the deadline passes and re-arms
+        // that deadline immediately, so the tick spacing bounds the schedule
+        // (in the GUI the same invariant is the `next_check = None` slot).
+        while let Ok(outcome) = update_rx.try_recv() {
+            match outcome {
+                update::CheckOutcome::Updated(info) => {
+                    if settings.general.auto_install {
+                        tracing::info!(
+                            "Auto-install: update {} ({})",
+                            info.version,
+                            info.commit_sha
+                        );
+                        let (tx, rx) = mpsc::channel::<Result<(), String>>();
+                        install_rx = Some(rx);
+                        // One plain std thread per install: `info` is moved in
+                        // (thread boundary — no borrow of the loop's state).
+                        std::thread::spawn(move || {
+                            let outcome = update_install::install(&info, |path| {
+                                self_replace::self_replace(path)
+                            })
+                            .map_err(|err| err.to_string());
+                            let _ = tx.send(outcome);
+                        });
+                    } else {
+                        tracing::info!(
+                            "Update available: {} ({}) — auto-install is OFF, nothing installed (spec §5)",
+                            info.version,
+                            info.commit_sha
+                        );
+                    }
+                }
+                update::CheckOutcome::UpToDate => tracing::debug!("update check: up to date"),
+                update::CheckOutcome::Failed(err) => tracing::warn!("update check failed: {err}"),
+            }
+        }
+        // Install result, drained on the same tick: success ends the park loop
+        // AND marks the restart, so `run_resident` restarts (spec §5).
+        let install_result = install_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = install_result {
+            install_rx = None;
+            match result {
+                Ok(()) => {
+                    tracing::info!("update installed: restart requested");
+                    restart_requested.store(true, Ordering::Relaxed);
+                    RESIDENT_SHUTDOWN.store(true, Ordering::Relaxed);
+                }
+                Err(message) => tracing::warn!("update install failed: {message}"),
+            }
+        }
+        // Interval check (spec §4.7): the deadline re-arms on every spawn, so
+        // the schedule follows the interval the settings published. The clones
+        // are the thread boundary — `spawn_check` moves owned values into its
+        // thread while the loop keeps its own for the next deadline.
+        if let Some(deadline) = next_check
+            && std::time::Instant::now() >= deadline
+        {
+            update::spawn_check(
+                settings.general.update_channel,
+                build.clone(),
+                update_tx.clone(),
+                update::fetch_manifest_text,
+            );
+            next_check = update::next_check_deadline(std::time::Instant::now(), interval);
+        }
+        if let Some(tray) = tray {
             for action in tray.poll() {
                 match action {
                     tray::TrayAction::Exit => {
@@ -492,9 +760,11 @@ fn park_without_gui(tray: Option<tray::TrayController>, settings: Settings, hand
                         capture::spawn_capture(
                             CaptureCommand {
                                 mode: CaptureMode::FullScreen,
+                                // Owned copy for the capture thread; the loop
+                                // keeps reading the same settings per tick.
                                 settings: settings.clone(),
                             },
-                            handoff_handle(&handoff),
+                            handoff_handle(handoff),
                         );
                     }
                     tray::TrayAction::ShowSettings => {
@@ -544,3 +814,7 @@ fn log_registrations(status: &hotkeys::StartStatus) {
 #[cfg(test)]
 #[path = "i18n.tests.rs"]
 mod i18n_tests;
+
+#[cfg(test)]
+#[path = "main.tests.rs"]
+mod tests;

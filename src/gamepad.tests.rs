@@ -102,8 +102,11 @@ fn newly_pressed_reports_only_zero_to_one_edges() {
 
 #[test]
 fn newly_pressed_release_only_change_has_no_edges() {
-    assert_eq!(newly_pressed(0b0110, 0b0010), vec![]);
-    assert_eq!(newly_pressed(0b0110, 0b0110), vec![]);
+    // `Vec::<u8>::new()` instead of `vec![]`: once the crate links
+    // `serde_json` (Stage 4 notes parsing), `u8: PartialEq<serde_json::Value>`
+    // becomes a candidate, so the empty literal's element type stops inferring.
+    assert_eq!(newly_pressed(0b0110, 0b0010), Vec::<u8>::new());
+    assert_eq!(newly_pressed(0b0110, 0b0110), Vec::<u8>::new());
 }
 
 #[test]
@@ -315,7 +318,7 @@ fn decide_pad_shot_held_bind_with_release_fires_nothing() {
     let mut capture = PadCapture::default();
     let newly = newly_pressed(0b000101, 0b000100);
 
-    assert_eq!(newly, vec![]);
+    assert_eq!(newly, Vec::<u8>::new()); // typed: see the `vec![]` note above
     assert_eq!(
         decide_pad_shot(
             &mut capture,

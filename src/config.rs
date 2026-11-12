@@ -421,8 +421,53 @@ pub(crate) enum OverlayPosition {
     BottomRight,
 }
 
-/// Output directory, filename templates, image format, encoder qualities, and
-/// the UI language (a locale code normalized by [`language_code`]).
+/// Auto-update check frequency; serialized as `"never"`, `"1h"`, `"1d"`, `"1w"`
+/// (`Format` pattern: explicit lowercase serde renames, not variant names).
+/// An unknown TOML value fails the parse (`Error::Parse`), so the whole config
+/// falls back to defaults via [`load_or_default`] — strict on purpose, unlike
+/// [`language_code`] which repairs `language` leniently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum UpdateCheck {
+    #[serde(rename = "never")]
+    Never,
+    #[serde(rename = "1h")]
+    Hour,
+    #[default]
+    #[serde(rename = "1d")]
+    Day,
+    #[serde(rename = "1w")]
+    Week,
+}
+
+impl UpdateCheck {
+    /// Interval between scheduled update checks. `None` means "no scheduled
+    /// check" (`Never`): the caller must not arm any timer. Consumed by the
+    /// auto-update schedulers — `gui::SettingsApp::logic` (GUI) and
+    /// `main::park_without_gui` (GUI-less).
+    pub(crate) fn interval(self) -> Option<std::time::Duration> {
+        match self {
+            UpdateCheck::Never => None,
+            UpdateCheck::Hour => Some(std::time::Duration::from_secs(3600)),
+            UpdateCheck::Day => Some(std::time::Duration::from_secs(86_400)),
+            UpdateCheck::Week => Some(std::time::Duration::from_secs(604_800)),
+        }
+    }
+}
+
+/// Release channel to look for updates in; serialized as `"stable"`,
+/// `"nightly"`. An unknown TOML value fails the parse like [`UpdateCheck`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum UpdateChannel {
+    #[default]
+    #[serde(rename = "stable")]
+    Stable,
+    #[serde(rename = "nightly")]
+    Nightly,
+}
+
+/// Output directory, filename templates, image format, encoder qualities, UI
+/// language (a locale code normalized by [`language_code`]), and the
+/// auto-update settings (task `2026-11-11_auto-update`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct General {
@@ -433,6 +478,12 @@ pub(crate) struct General {
     pub(crate) format: Format,
     pub(crate) jpeg_quality: u8,
     pub(crate) webp_quality: u8,
+    /// How often to check for updates (default `1d`).
+    pub(crate) update_check: UpdateCheck,
+    /// Which release channel to check (default `stable`).
+    pub(crate) update_channel: UpdateChannel,
+    /// Install an available update without asking (default `false`).
+    pub(crate) auto_install: bool,
 }
 
 impl Default for General {
@@ -455,6 +506,9 @@ fn general_with_home(home: Option<&Path>) -> General {
         format: Format::Png,
         jpeg_quality: 90,
         webp_quality: 90,
+        update_check: UpdateCheck::Day,
+        update_channel: UpdateChannel::Stable,
+        auto_install: false,
     }
 }
 
