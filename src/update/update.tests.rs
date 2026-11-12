@@ -758,10 +758,15 @@ fn run_check_dev_build_higher_version_older_date_reports_up_to_date() {
 
 #[test]
 fn run_check_newer_manifest_returns_updated_info() {
-    #[cfg(target_os = "windows")]
-    let expected_url = "https://github.com/Apkawa/virshot/releases/download/nightly/virshot-0.1.0-nightly-f710773-win-x64.zip";
-    #[cfg(target_os = "linux")]
-    let expected_url = "https://github.com/Apkawa/virshot/releases/download/nightly/virshot-0.1.0-nightly-f710773-linux-x64.tar.gz";
+    // The fixture lists windows first, linux second, so the expected entry is
+    // picked by target — the same way `run_check` picks it — not by a fixed
+    // index, which only held on Linux.
+    let fixture = fixture_manifest();
+    let expected = select_file(
+        &fixture,
+        platform_file_type().expect("x86_64 test hosts publish an artifact"),
+    )
+    .expect("the fixture carries the current platform's entry");
 
     let outcome = run_check(
         config::UpdateChannel::Nightly,
@@ -776,9 +781,10 @@ fn run_check_newer_manifest_returns_updated_info() {
             // `commit_sha` stays in the dialog summary even though it is no
             // longer a decision trigger.
             assert_eq!(info.commit_sha, "f710773");
-            assert_eq!(info.archive_url, expected_url);
+            assert_eq!(info.archive_url, expected.url);
+            assert_eq!(info.sha512, expected.sha512);
             assert_eq!(info.sha512.len(), 88);
-            assert_eq!(info.size, fixture_manifest().files[1].size);
+            assert_eq!(info.size, expected.size);
         }
         other => panic!("expected Updated, got {other:?}"),
     }
