@@ -142,13 +142,14 @@ static RESIDENT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 const LOG_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Startup-check decision (spec §4.7, Stages 7-9): a background check runs at
-/// startup ONLY when checks are scheduled (`update_check != Never`). Dev builds
-/// are NOT excluded — a `-dev` build checks updates on the same terms as a
-/// release build: `update::decide_update` ships an update iff the release
+/// startup ONLY when checks are scheduled (`update_check != Never`). Dev
+/// builds are NOT excluded — a `-dev` build checks updates on the same terms
+/// as a release build: `update::decide_update` ships an update iff the release
 /// `releaseDate` is newer than the embedded build time OR the release VERSION
-/// is higher, so `commit_sha` is no longer a decision input (Stage 11).
-/// `is_dev` is still passed by callers so the build kind is stated at the call
-/// site, but no longer changes the decision.
+/// is higher, with the hotfix 2026-11-12 guard: an equal `commit_sha`
+/// suppresses the date trigger (a re-packaged nightly of the same commit is
+/// not a newer build). `is_dev` is still passed by callers so the build kind
+/// is stated at the call site, but no longer changes the decision.
 /// `arm_startup_check` applies it on both resident paths; the interval checks
 /// live in `gui::SettingsApp::logic` (GUI) and in `park_without_gui` (GUI-less).
 fn should_check_at_startup(interval: config::UpdateCheck, _is_dev: bool) -> bool {

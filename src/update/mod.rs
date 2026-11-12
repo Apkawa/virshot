@@ -16,10 +16,15 @@
 //!
 //! Update decision (stage 11 sub-item 1, task 2026-11-11_auto-update): the
 //! triggers are the release DATE (newer than the local build time) and the
-//! release VERSION (higher than the local version). `commit_sha` is not a
-//! trigger anymore — it stays in the manifest and the dialog summary. The
-//! RFC 3339 timestamps are parsed by a hand-written [`parse_rfc3339_epoch_seconds`]
-//! (no new dependency), compared as Unix seconds.
+//! release VERSION (higher than the local version). Hotfix 2026-11-12: an
+//! equal `commit_sha` SUPPRESSES the date trigger — `releaseDate` is the
+//! packaging timestamp of `scripts/package-release.sh`, not a commit
+//! timestamp, so a re-packaged nightly of the SAME commit carries a date
+//! newer than the local build time and used to announce a phantom update.
+//! The sha stays in the manifest and the dialog summary; the version trigger
+//! keeps its semantics under the guard. The RFC 3339 timestamps are parsed by
+//! a hand-written [`parse_rfc3339_epoch_seconds`] (no new dependency),
+//! compared as Unix seconds.
 
 pub(crate) mod install;
 pub(crate) mod notes;
@@ -88,8 +93,8 @@ pub(crate) struct ReleaseFile {
 
 /// The whole `release.yaml` asset. Wire names: `version`, `releaseDate`
 /// (ISO-8601 with milliseconds and `Z`, or a `±HH:MM` offset), `commit_sha`
-/// (SHORT sha — kept for the dialog summary only; since stage 11 sub-item 1
-/// the decision triggers on date/version, not on the sha).
+/// (SHORT sha — dialog summary plus the up-to-date guard of
+/// [`decide_update`], hotfix 2026-11-12).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub(crate) struct ReleaseManifest {
     pub(crate) version: String,
@@ -157,15 +162,16 @@ pub(crate) fn select_file<'a>(
 /// The running build as the update decision sees it: `version` is the
 /// About-dialog version string (`about::version_with_dev`, so dev builds carry
 /// the `-dev` suffix), `build_time` is shadow-rs `BUILD_TIME_3339` (UTC RFC
-/// 3339). The decision takes these as injected values, so unit tests never
-/// read the embedded constants. `short_commit` is NOT part of this struct
-/// anymore: since stage 11 sub-item 1 the sha is not a decision input (the
-/// local sha surfaces in the About dialog from the shadow-rs constant
-/// directly, the release sha in the dialog summary from [`UpdateInfo`]).
+/// 3339), `short_commit` is shadow-rs `SHORT_COMMIT`. The decision takes
+/// these as injected values, so unit tests never read the embedded constants.
+/// `short_commit` returned as a decision input by the hotfix 2026-11-12: it
+/// SUPPRESSES the date trigger when the manifest carries the same commit
+/// (it never ADDS an "update available" — an unequal sha triggers nothing).
 #[derive(Debug, Clone)]
 pub(crate) struct BuildInfo {
     pub(crate) version: String,
     pub(crate) build_time: String,
+    pub(crate) short_commit: String,
 }
 
 impl BuildInfo {
@@ -181,18 +187,25 @@ impl BuildInfo {
 
 /// Snapshot of the current build from the embedded shadow-rs constants, for
 /// the Stage 7 wiring. shadow-rs leaves build fields empty when the data is
-/// unavailable; [`decide_update`] then falls back to version comparison.
+/// unavailable; [`decide_update`] then falls back to the version comparison
+/// (and the sha guard reads as inconclusive on empty values).
 pub(crate) fn current_build() -> BuildInfo {
     BuildInfo {
         version: crate::about::version_with_dev(crate::build::PKG_VERSION, crate::build::TAG),
         build_time: crate::build::BUILD_TIME_3339.to_owned(),
+        short_commit: crate::build::SHORT_COMMIT.to_owned(),
     }
 }
 
 /// Update-available rule (spec §4.7, stage 11 sub-item 1): an update exists
 /// when the published **release date is newer than the local build time** OR
-/// the published **version is higher than the local version**. `commit_sha`
-/// is not a trigger anymore (it stays in the manifest and dialog summary).
+/// the published **version is higher than the local version**. Hotfix
+/// 2026-11-12: when the manifest's `commit_sha` names the SAME commit as the
+/// local build ([`commit_matches`]), the DATE trigger is suppressed entirely —
+/// `releaseDate` is a packaging timestamp, so CI re-packaging the same commit
+/// produces a later date than the local build and used to announce a phantom
+/// update. Equal shas never offer an update; an unequal sha triggers nothing
+/// by itself. The version trigger keeps its semantics under the guard.
 /// The rule applies to release builds AND `-dev` builds alike — the old
 /// dev-only sha comparison is gone; the `-dev` suffix is stripped from the
 /// local version before comparing so a dev build never reads as unequal.
@@ -201,10 +214,11 @@ pub(crate) fn current_build() -> BuildInfo {
 /// fractional seconds truncated, UTC offsets applied, so `14:29:09.928+03:00`
 /// and `11:29:09.928Z` are the same instant). Failure mode: an unparseable
 /// `releaseDate` → [`UpdateError::Parse`] naming the offending value — never
-/// "update available". When the embedded build time is empty or unparseable
-/// (shadow-rs can leave build fields empty), the date comparison is skipped
-/// and only the version comparison decides: dates can NEVER infer an update
-/// there.
+/// "update available"; an unparseable date is not read at all when the shas
+/// match (there is nothing to compare). When the embedded build time is empty
+/// or unparseable (shadow-rs can leave build fields empty), the date
+/// comparison is skipped and only the version comparison decides: dates can
+/// NEVER infer an update there.
 ///
 /// Accepted tradeoff (user decision): a newer release date triggers an update
 /// even when the manifest version is LOWER than the local version — the
@@ -213,16 +227,37 @@ pub(crate) fn decide_update(
     manifest: &ReleaseManifest,
     build: &BuildInfo,
 ) -> Result<bool, UpdateError> {
-    let release_seconds = parse_rfc3339_epoch_seconds(&manifest.release_date)?;
-    // An empty/unparseable embedded build time skips the date comparison;
-    // only the version can decide then (dates never infer an update there).
-    let build_seconds = parse_rfc3339_epoch_seconds(&build.build_time).ok();
-    if let Some(build_seconds) = build_seconds
-        && release_seconds > build_seconds
-    {
-        return Ok(true);
+    // Hotfix 2026-11-12: same commit → nothing newer to install, the date is
+    // not a signal; the version comparison below still decides on its own.
+    if !commit_matches(&build.short_commit, &manifest.commit_sha) {
+        let release_seconds = parse_rfc3339_epoch_seconds(&manifest.release_date)?;
+        // An empty/unparseable embedded build time skips the date comparison;
+        // only the version can decide then (dates never infer an update there).
+        let build_seconds = parse_rfc3339_epoch_seconds(&build.build_time).ok();
+        if let Some(build_seconds) = build_seconds
+            && release_seconds > build_seconds
+        {
+            return Ok(true);
+        }
     }
     Ok(version_higher(&manifest.version, &build.version))
+}
+
+/// Whether the manifest's `commit_sha` names the same commit as the local
+/// build. Abbreviation lengths differ by source — `git rev-parse --short`
+/// (what CI writes into the manifest) vs shadow-rs `SHORT_COMMIT` — so a
+/// prefix of either side matches, case-insensitively (hex case is a wire
+/// artifact). An empty value on either side is INCONCLUSIVE: missing git
+/// data must never read as a match, so the date rule keeps applying.
+fn commit_matches(local_sha: &str, release_sha: &str) -> bool {
+    if local_sha.is_empty() || release_sha.is_empty() {
+        return false;
+    }
+    // Short hex strings (7-40 chars): lowercasing is cheaper than a
+    // case-insensitive prefix helper and keeps both directions symmetric.
+    let local = local_sha.to_ascii_lowercase();
+    let release = release_sha.to_ascii_lowercase();
+    local.starts_with(&release) || release.starts_with(&local)
 }
 
 /// `major.minor.patch` parsed as three integer segments: missing trailing

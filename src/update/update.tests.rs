@@ -1,12 +1,13 @@
 //! Sibling tests for `update`: `release.yaml` metadata parsing, platform
 //! target mapping, file selection, the update decision (date/version rule —
-//! stage 11 sub-item 1 of task 2026-11-11_auto-update; `commit_sha` is not a
-//! decision input anymore), dev-build detection, the hand-written RFC 3339
-//! parser, check-deadline scheduling, channel URL pinning, and the check
-//! orchestration behind an injected fake fetcher. No network is performed
-//! anywhere: `fetch_manifest_text` is only exercised by the real app, never
-//! here. Build times are always injected values — the embedded shadow-rs
-//! constants are never read inside the decision.
+//! stage 11 sub-item 1 of task 2026-11-11_auto-update, plus the hotfix
+//! 2026-11-12 guard: an equal `commit_sha` suppresses the date trigger),
+//! dev-build detection, the hand-written RFC 3339 parser, check-deadline
+//! scheduling, channel URL pinning, and the check orchestration behind an
+//! injected fake fetcher. No network is performed anywhere:
+//! `fetch_manifest_text` is only exercised by the real app, never here. Build
+//! times are always injected values — the embedded shadow-rs constants are
+//! never read inside the decision.
 
 use super::*;
 use crate::config::UpdateCheck;
@@ -61,12 +62,18 @@ fn fixture_manifest() -> ReleaseManifest {
 }
 
 /// Minimal manifest for the decision tests: `decide_update` never touches
-/// `files`, so only `version` and `release_date` matter there.
+/// `files`, so only `version`, `release_date`, and the sha guard matter there.
 fn manifest(version: &str, release_date: &str) -> ReleaseManifest {
+    manifest_sha(version, release_date, "f710773")
+}
+
+/// Same as [`manifest`] with the manifest commit sha chosen by the test — the
+/// hotfix guard compares it against the build's `short_commit`.
+fn manifest_sha(version: &str, release_date: &str, commit_sha: &str) -> ReleaseManifest {
     ReleaseManifest {
         version: version.to_owned(),
         release_date: release_date.to_owned(),
-        commit_sha: "f710773".to_owned(),
+        commit_sha: commit_sha.to_owned(),
         files: Vec::new(),
     }
 }
@@ -75,10 +82,18 @@ fn build(version: &str) -> BuildInfo {
     build_at(version, LOCAL_BUILD_TIME)
 }
 
+/// Build with a `short_commit` deliberately DIFFERENT from the fixture sha
+/// `f710773`, so the existing date/version tests keep exercising the triggers
+/// instead of the sha guard.
 fn build_at(version: &str, build_time: &str) -> BuildInfo {
+    build_at_sha(version, build_time, "abc1234")
+}
+
+fn build_at_sha(version: &str, build_time: &str, short_commit: &str) -> BuildInfo {
     BuildInfo {
         version: version.to_owned(),
         build_time: build_time.to_owned(),
+        short_commit: short_commit.to_owned(),
     }
 }
 
@@ -228,12 +243,13 @@ fn select_file_unknown_target_returns_no_file_for_target() {
     );
 }
 
-// --- The update decision: release date OR version, never commit_sha -------
+// --- The update decision: release date OR version, guarded by equal sha ---
 
 #[test]
 fn decide_update_matching_version_and_older_date_returns_false() {
     // Same version, release date older than the local build time: up to
-    // date. The fixture sha `f710773` carries no decision weight anymore.
+    // date. The fixture sha `f710773` does not match the injected local
+    // `abc1234`, so the guard stays silent and the date path decides.
     assert!(
         !decide_update(&fixture_manifest(), &build("0.1.0"))
             .expect("a valid manifest must produce a conclusive decision")
@@ -244,9 +260,9 @@ fn decide_update_matching_version_and_older_date_returns_false() {
 fn decide_update_nightly_date_older_than_build_same_version_returns_false() {
     // The user's real case: nightly dated 2026-11-10 seen by a build dated
     // 2026-11-12 that was compiled from a DIFFERENT commit than the nightly
-    // republish (fixture sha `f710773`). The sha is not a trigger anymore
-    // (stage 11 sub-item 1), so it is not even part of the decision input:
-    // the date is older and the stripped version is equal → up to date.
+    // republish (fixture sha `f710773`, injected local `abc1234`): the sha
+    // guard is silent on unequal shas, the date is older and the stripped
+    // version is equal → up to date.
     assert!(
         !decide_update(&fixture_manifest(), &build("0.1.0-dev"))
             .expect("a valid manifest must produce a conclusive decision"),
@@ -385,6 +401,103 @@ fn decide_update_offset_release_date_newer_than_build_returns_true() {
             &build_at("0.1.0", "2026-11-10T11:29:08Z")
         )
         .expect("a valid manifest must produce a conclusive decision")
+    );
+}
+
+// --- Hotfix 2026-11-12: an equal commit sha suppresses the date trigger ----
+
+#[test]
+fn decide_update_same_commit_newer_date_returns_false() {
+    // The hotfix scenario: the nightly was RE-PACKAGED from the SAME commit
+    // after the local build, so the manifest `releaseDate` (a packaging
+    // timestamp from `package-release.sh`, not a commit timestamp) is newer
+    // than the embedded build time. Equal shas mean there is nothing newer
+    // to install — the date trigger must not fire.
+    assert!(
+        !decide_update(
+            &fixture_manifest(),
+            &build_at_sha("0.1.0-dev", "2026-11-09T00:00:00Z", "f710773")
+        )
+        .expect("a valid manifest must produce a conclusive decision"),
+        "a re-published nightly from the same commit must stay up to date"
+    );
+}
+
+#[test]
+fn decide_update_release_sha_longer_than_local_short_sha_returns_false() {
+    // Abbreviation lengths differ between `git rev-parse --short` (what CI
+    // writes into the manifest) and shadow-rs `SHORT_COMMIT`: the local
+    // short sha being a prefix of the manifest sha is a match, date ignored.
+    assert!(
+        !decide_update(
+            &manifest_sha(
+                "0.1.0",
+                "2026-11-12T00:00:00Z",
+                "f71077357be6fc6d3e8228c06de60dc07e56702f"
+            ),
+            &build_at_sha("0.1.0", "2026-11-09T00:00:00Z", "f710773")
+        )
+        .expect("a valid manifest must produce a conclusive decision"),
+        "a manifest full sha must match the local abbreviated sha"
+    );
+}
+
+#[test]
+fn decide_update_release_sha_case_insensitive_match_returns_false() {
+    // Hex case is a wire artifact, not a commit difference.
+    assert!(
+        !decide_update(
+            &manifest_sha("0.1.0", "2026-11-12T00:00:00Z", "F710773"),
+            &build_at_sha("0.1.0", "2026-11-09T00:00:00Z", "f710773")
+        )
+        .expect("a valid manifest must produce a conclusive decision"),
+        "case differences must not split the same commit into two"
+    );
+}
+
+#[test]
+fn decide_update_empty_commit_sha_newer_date_returns_true() {
+    // An empty sha on EITHER side is inconclusive (shadow-rs leaves git
+    // fields empty without git data): the guard stays silent and the date
+    // rule applies exactly as before the hotfix.
+    assert!(
+        decide_update(
+            &manifest_sha("0.1.0", "2026-11-12T00:00:00Z", ""),
+            &build_at_sha("0.1.0", "2026-11-09T00:00:00Z", "")
+        )
+        .expect("a valid manifest must produce a conclusive decision"),
+        "empty shas on both sides must not read as a match"
+    );
+    assert!(
+        decide_update(
+            &manifest_sha("0.1.0", "2026-11-12T00:00:00Z", ""),
+            &build_at_sha("0.1.0", "2026-11-09T00:00:00Z", "abc1234")
+        )
+        .expect("a valid manifest must produce a conclusive decision"),
+        "an empty manifest sha must not suppress the date trigger"
+    );
+    assert!(
+        decide_update(
+            &manifest_sha("0.1.0", "2026-11-12T00:00:00Z", "f710773"),
+            &build_at_sha("0.1.0", "2026-11-09T00:00:00Z", "")
+        )
+        .expect("a valid manifest must produce a conclusive decision"),
+        "an empty local sha must not suppress the date trigger"
+    );
+}
+
+#[test]
+fn decide_update_same_commit_higher_version_returns_true() {
+    // The guard suppresses the DATE only: the version trigger keeps its
+    // semantics even when the shas match. (Same commit + higher version is
+    // not producible by the release flow; the rule stays honest anyway.)
+    assert!(
+        decide_update(
+            &manifest_sha("0.2.0", "2026-11-12T00:00:00Z", "f710773"),
+            &build_at_sha("0.1.0-dev", "2026-11-09T00:00:00Z", "f710773")
+        )
+        .expect("a valid manifest must produce a conclusive decision"),
+        "a higher release version must offer an update despite equal shas"
     );
 }
 
@@ -735,6 +848,23 @@ fn run_check_dev_build_date_newer_fetches_and_reports_updated() {
 }
 
 #[test]
+fn run_check_dev_build_same_commit_newer_date_reports_up_to_date() {
+    // The hotfix end-to-end behind the fetch seam: the fixture nightly dated
+    // 2026-11-10 seen by a dev build dated 2026-11-09 built from the SAME
+    // commit `f710773` — the re-packaging date must not announce an update.
+    let outcome = run_check(
+        config::UpdateChannel::Nightly,
+        &build_at_sha("0.1.0-dev", "2026-11-09T00:00:00Z", "f710773"),
+        ok_fetch(NIGHTLY_FIXTURE),
+    );
+
+    assert!(
+        matches!(outcome, CheckOutcome::UpToDate),
+        "a re-published nightly from the same commit must stay up to date"
+    );
+}
+
+#[test]
 fn run_check_dev_build_higher_version_older_date_reports_up_to_date() {
     // A dev build ahead of the manifest (stripped version higher, dated
     // after the nightly): fetch happens, no update offered.
@@ -778,8 +908,9 @@ fn run_check_newer_manifest_returns_updated_info() {
         CheckOutcome::Updated(info) => {
             assert_eq!(info.version, "0.1.0");
             assert_eq!(info.release_date, "2026-11-10T11:29:09.928Z");
-            // `commit_sha` stays in the dialog summary even though it is no
-            // longer a decision trigger.
+            // `commit_sha` stays in the dialog summary; it differs from the
+            // injected build sha here, so the guard does not suppress the
+            // date trigger.
             assert_eq!(info.commit_sha, "f710773");
             assert_eq!(info.archive_url, expected.url);
             assert_eq!(info.sha512, expected.sha512);
