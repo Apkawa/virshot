@@ -89,9 +89,10 @@ fn tooltip() -> String {
     rust_i18n::t!("tray.tooltip").into_owned()
 }
 
-/// The menu labels, in menu order — the single seam that BOTH menu paths
-/// render ([`build_menu`] reads it), so the startup menu and the post-Apply
-/// rebuild can never drift from each other or from the catalog (spec §2).
+/// The menu labels — the single seam that BOTH menu paths render
+/// ([`build_menu`] reads them and decides the order), so the startup menu and
+/// the post-Apply rebuild can never drift from each other or from the catalog
+/// (spec §2).
 pub(crate) fn menu_labels() -> (String, String, String, String) {
     (
         take_screenshot_label(),
@@ -123,9 +124,11 @@ fn build_menu() -> Result<Menu, Error> {
         .map_err(|err| unavailable(err.to_string()))?;
     menu.append(&MenuItem::with_id(MENU_ID_SETTINGS, settings, true, None))
         .map_err(|err| unavailable(err.to_string()))?;
-    menu.append(&MenuItem::with_id(MENU_ID_EXIT, exit, true, None))
-        .map_err(|err| unavailable(err.to_string()))?;
     menu.append(&MenuItem::with_id(MENU_ID_ABOUT, about, true, None))
+        .map_err(|err| unavailable(err.to_string()))?;
+    menu.append(&PredefinedMenuItem::separator())
+        .map_err(|err| unavailable(err.to_string()))?;
+    menu.append(&MenuItem::with_id(MENU_ID_EXIT, exit, true, None))
         .map_err(|err| unavailable(err.to_string()))?;
 
     Ok(menu)

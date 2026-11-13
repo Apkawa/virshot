@@ -628,8 +628,9 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
 
 - Встроенная иконка (простой camera glyph; кастомная — позже).
 - Левый клик — открыть окно настроек.
-- Правый клик — меню: `Take screenshot` (захват всего экрана), `Settings`, `Exit`,
-  `About` (4-й пункт после `Exit`, task `2026-11-10_about-dialog`). Метки меню на
+- Правый клик — меню: `Take screenshot` (захват всего экрана), `Settings`,
+  `About`, `Exit` (`About` добавлен task `2026-11-10_about-dialog`, `Exit` —
+  последний пункт после разделителя). Метки меню на
   языке UI (каталог `tray.*`, `src/tray.rs`) и пересобираются
   на Apply (`tray::TrayController::refresh_menu`) — без
   перезапуска; tooltip остаётся `virshot` (не локализуется, `src/tray.rs:80-82`).

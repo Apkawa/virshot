@@ -145,8 +145,8 @@ fn tray_menu_labels_render_through_catalog_keys() {
 
     // The menu builder renders exactly the catalog quartet
     // (`tray.take_screenshot` / `tray.settings` / `tray.exit` /
-    // `tray.about`) in menu order, and the tooltip renders through
-    // `tray.tooltip` — spec §2: every tray string is a catalog lookup.
+    // `tray.about`), and the tooltip renders through `tray.tooltip` —
+    // spec §2: every tray string is a catalog lookup.
     let (take, settings, exit, about) = menu_labels();
     assert_eq!(take, rust_i18n::t!("tray.take_screenshot").as_ref());
     assert_eq!(settings, rust_i18n::t!("tray.settings").as_ref());
@@ -163,10 +163,10 @@ fn tray_menu_rebuild_uses_current_locale_labels() {
     // Startup (`TrayController::new`) and the post-Apply rebuild
     // (`refresh_menu`) share ONE builder, so a locale change cannot drift the
     // two paths. The drift check covers the CONTRACTUAL items: muda
-    // auto-numbers predefined item ids (the separator gets a fresh id per
+    // auto-numbers predefined item ids (each separator gets a fresh id per
     // build — verified in the locked muda source, and `action_for_menu_id`
-    // maps no such id), so the separator is compared by its slot position
-    // (no label), and the mapped quartet by id + label + order.
+    // maps no such id), so the separators are compared by their slot
+    // positions (no label), and the mapped quartet by id + label + order.
     let first = build_menu().expect("fresh items must append");
     let second = build_menu().expect("fresh items must append");
     let texts = |menu: &Menu| -> Vec<String> {
@@ -190,8 +190,8 @@ fn tray_menu_rebuild_uses_current_locale_labels() {
         vec![
             MenuId(MENU_ID_TAKE_SCREENSHOT.to_owned()),
             MenuId(MENU_ID_SETTINGS.to_owned()),
-            MenuId(MENU_ID_EXIT.to_owned()),
             MenuId(MENU_ID_ABOUT.to_owned()),
+            MenuId(MENU_ID_EXIT.to_owned()),
         ],
         "mapped item ids must be stable across builds"
     );
@@ -206,8 +206,8 @@ fn tray_menu_rebuild_uses_current_locale_labels() {
     let (take, settings, exit, about) = menu_labels();
     assert_eq!(
         labels,
-        vec![take, settings, exit, about],
-        "menu order must be take screenshot → settings → exit → about"
+        vec![take, settings, about, exit],
+        "menu order must be take screenshot → settings → about → exit"
     );
 }
 
