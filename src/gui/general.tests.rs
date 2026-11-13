@@ -126,6 +126,67 @@ fn placeholder_reference_lists_window_title_and_extension() {
     );
 }
 
+// ---------- autostart control (General tab bottom row, task 2026-11-13_autostart) ----------
+
+/// The autostart row renders two catalog strings: the Windows checkbox label
+/// and the disabled non-Windows placeholder note. Both must resolve to real
+/// localized text in every shipped locale — and the note must NOT be a second
+/// copy of the label, because it is the Windows-only explanation the Linux
+/// placeholder shows instead of a live checkbox. English values are pinned
+/// byte-for-byte: they are the shipped wording the tab paints.
+#[test]
+fn autostart_label_and_placeholder_render_in_every_locale() {
+    let _guard = locale_guard();
+    rust_i18n::set_locale("en");
+
+    let en_label = autostart_label();
+    let en_note = autostart_placeholder_label();
+    assert_eq!(
+        en_label, "Add to autostart",
+        "en checkbox label must be the shipped wording, got \"{en_label}\""
+    );
+    assert_eq!(
+        en_note, "(autostart — Windows only)",
+        "en placeholder note must be the shipped wording, got \"{en_note}\""
+    );
+    assert_ne!(
+        en_label, en_note,
+        "the placeholder must be the Windows-only note, not the checkbox label"
+    );
+
+    for locale in ["ru", "zh-CN", "es", "ja", "ko"] {
+        rust_i18n::set_locale(locale);
+        let label = autostart_label();
+        let note = autostart_placeholder_label();
+        rust_i18n::set_locale("en");
+
+        assert_ne!(
+            label, en_label,
+            "the checkbox label must follow the UI language under {locale}, got \"{label}\""
+        );
+        assert_ne!(
+            note, en_note,
+            "the placeholder note must follow the UI language under {locale}, got \"{note}\""
+        );
+        // rust-i18n echoes the dotted key itself on a miss, so an echo here
+        // means the key is missing from the catalog for this locale.
+        assert_ne!(
+            label, "general.autostart_label",
+            "key must resolve under {locale}"
+        );
+        assert_ne!(
+            note, "general.autostart_windows_only_note",
+            "key must resolve under {locale}"
+        );
+        if locale == "ru" || locale == "zh-CN" || locale == "ja" || locale == "ko" {
+            assert!(
+                !label.is_ascii() && !note.is_ascii(),
+                "every {locale} autostart string must contain non-ASCII text, got {label:?} / {note:?}"
+            );
+        }
+    }
+}
+
 // ---------- language dropdown (General tab, Stage 2b, spec §2) ----------
 
 #[test]

@@ -386,6 +386,23 @@ impl SettingsApp {
                         tracing::warn!("Tray menu rebuild failed: {err}");
                     }
                 }
+                // Autostart sync (task 2026-11-13_autostart, spec §4.4): the
+                // HKCU `Run` entry follows the SAVED draft flag, so the
+                // checkbox lands in the registry on Apply with no restart.
+                // Placed last because it reads draft values like the locale
+                // switch and shares no ordering with locale/tray. A registry
+                // failure is an ERROR log only: `config::save` already wrote,
+                // so the save stays successful and Apply/OK keep working
+                // (spec §5) — no return, no panic. Runs on the GUI thread: a
+                // quick registry read/write, no spawned thread.
+                #[cfg(windows)]
+                match crate::autostart::sync(self.draft.general.autostart()) {
+                    Ok(()) => tracing::info!(
+                        "autostart registry entry updated (enabled: {})",
+                        self.draft.general.autostart()
+                    ),
+                    Err(err) => tracing::error!("autostart sync failed: {err} — settings saved"),
+                }
             }
             Err(err) => tracing::error!("Config save failed: {err}"),
         }

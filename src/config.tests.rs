@@ -22,6 +22,11 @@ fn settings_defaults_match_spec_section_7() {
     assert_eq!(settings.general.update_channel, UpdateChannel::Stable);
     assert!(!settings.general.auto_install);
 
+    // Windows-only `autostart` (task 2026-11-13_autostart): default false;
+    // the field exists only under `#[cfg(windows)]`, so the assert is gated.
+    #[cfg(windows)]
+    assert!(!settings.general.autostart);
+
     assert_eq!(settings.controls.full_screen.key, "PrintScreen");
     assert_eq!(settings.controls.full_screen.mods, Vec::<String>::new());
     assert_eq!(settings.controls.full_screen.pad, None);
@@ -657,6 +662,8 @@ fn save_then_load_round_trip_preserves_settings() {
             update_check: UpdateCheck::Hour,
             update_channel: UpdateChannel::Nightly,
             auto_install: true,
+            #[cfg(windows)]
+            autostart: false,
         },
         controls: Controls {
             full_screen: Binding::default(),
@@ -921,4 +928,105 @@ fn save_then_load_round_trip_preserves_update_settings() {
     assert!(text.contains("update_check = \"never\""));
     assert!(text.contains("update_channel = \"nightly\""));
     assert!(text.contains("auto_install = true"));
+}
+
+// ---------- autostart (Windows-only, task 2026-11-13_autostart) ----------
+
+// `general.autostart` is a Windows-only option: the struct field is
+// `#[cfg(windows)]`, so these tests are gated exactly like
+// `canonical_pad_names_match_the_gamepad_label_table` in
+// `src/bindings.tests.rs` — on linux they are not compiled at all. A plain
+// section comment (not `///`): a doc comment here would hang over the
+// `#[cfg(windows)]` attribute with an empty line between them, which clippy
+// flags on the windows target (`empty_line_after_doc_comments`).
+
+#[cfg(windows)]
+#[test]
+fn autostart_default_is_false() {
+    assert!(!Settings::default().general.autostart);
+
+    // A defaults save/load round-trip must keep the value false.
+    let dir = TempDir::new("autostart-default");
+    let path = dir.config_path("config.toml");
+
+    save(&Settings::default(), &path).expect("save must succeed");
+    let loaded = load(&path).expect("saved config must load back");
+
+    assert_eq!(loaded, Settings::default());
+    assert!(!loaded.general.autostart);
+}
+
+#[cfg(windows)]
+#[test]
+fn autostart_roundtrip_keeps_true_value() {
+    let dir = TempDir::new("autostart-true");
+    let path = dir.config_path("config.toml");
+    let settings = Settings {
+        general: General {
+            autostart: true,
+            ..General::default()
+        },
+        ..Settings::default()
+    };
+
+    save(&settings, &path).expect("save must succeed");
+    let loaded = load(&path).expect("saved config must load back");
+
+    assert!(loaded.general.autostart);
+    assert_eq!(loaded, settings);
+}
+
+#[cfg(windows)]
+#[test]
+fn autostart_partial_toml_defaults_to_false() {
+    // A config predating the `autostart` key must get the default without
+    // touching sibling keys (struct-level `#[serde(default)]`).
+    let dir = TempDir::new("autostart-partial");
+    let path = dir.config_path("config.toml");
+    std::fs::write(&path, "[general]\nformat = \"jpg\"\n").expect("fixture must be writable");
+
+    let settings = load(&path).expect("partial config must load");
+
+    assert!(!settings.general.autostart);
+    assert_eq!(settings.general.format, Format::Jpeg);
+    assert_eq!(settings.general.update_check, UpdateCheck::Day);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn autostart_key_is_absent_on_linux_and_ignored() {
+    // On linux the field does not exist, so a saved config must never carry
+    // the Windows-only key, and a foreign `autostart` key must be ignored
+    // without a parse error (unknown keys are tolerated: no
+    // `deny_unknown_fields`), leaving the defaults path intact.
+    let dir = TempDir::new("autostart-linux");
+
+    let saved = dir.config_path("config.toml");
+    save(&Settings::default(), &saved).expect("save must succeed");
+    let text = std::fs::read_to_string(&saved).expect("saved file must be readable");
+    assert!(
+        !text.contains("autostart"),
+        "linux TOML must never contain the Windows-only key: {text}"
+    );
+
+    let foreign = dir.config_path("foreign.toml");
+    std::fs::write(&foreign, "[general]\nautostart = true\n").expect("fixture must be writable");
+
+    let settings = load(&foreign).expect("foreign autostart key must be ignored");
+    assert_eq!(settings.general, General::default());
+}
+
+#[cfg(not(windows))]
+#[test]
+fn autostart_accessors_on_linux_read_false_and_ignore_writes() {
+    // The GUI placeholder path (`src/gui/general.rs`) goes through this dual
+    // accessor pair, so on linux a checkbox press must leave the whole
+    // `Settings` byte-identical — otherwise the bottom-bar dirty gate
+    // (`chrome::is_dirty`) would light up for an option that does not exist.
+    let mut general = General::default();
+    assert!(!general.autostart(), "linux must read the flag as false");
+
+    general.set_autostart(true);
+    assert!(!general.autostart(), "linux writes must be ignored");
+    assert_eq!(general, General::default(), "the draft must stay clean");
 }

@@ -18,8 +18,14 @@
 //! to Windows) and fires pad binds — including Guide/Share system buttons —
 //! through the SAME shared debounce gate as the hotkey listener, so an action
 //! fires once per interval whatever triggered it; Linux has no GameInput
-//! backend (gilrs stays out of scope), where the module only logs. The MVP
-//! keyboard trigger is the global hotkey, wired in Stage 6. Bare `virshot` is the resident app (Stage 8):
+//! backend (gilrs stays out of scope), where the module only logs. Autostart
+//! (task `2026-11-13_autostart`, spec §4.4): `autostart` syncs the HKCU `Run`
+//! registry value with the Windows-only config flag `general.autostart` — the
+//! decision table and the quoted exe payload are pure logic gated
+//! `cfg(any(test, windows))`, registry access goes through the `winreg`
+//! dependency (target-scoped to Windows, pure Rust), and `sync` off Windows
+//! is a no-op `Ok(())`. The MVP keyboard trigger is the global hotkey, wired
+//! in Stage 6. Bare `virshot` is the resident app (Stage 8):
 //! loads config, registers hotkeys via `hotkeys::HotkeysController` (manager
 //! on the MAIN thread — Windows WM_HOTKEY thread affinity), opens the eframe
 //! settings window on the MAIN thread (`gui`); the window X button hides the
@@ -84,6 +90,7 @@ const I18N_CATALOG_SOURCE: &str = include_str!("../locales/app.yml");
 shadow_rs::shadow!(build);
 
 mod about;
+pub(crate) mod autostart;
 mod bindings;
 mod capture;
 mod config;
@@ -452,6 +459,20 @@ fn run_resident(config_path: &Path) -> ExitCode {
         }
     };
     tracing::info!("Instance lock acquired (pid {})", std::process::id());
+    // Autostart sync (task 2026-11-13_autostart, spec §4.4): the HKCU `Run`
+    // entry follows `general.autostart` on every start — like the locale
+    // sync above, the config is the source of truth, so a manual config edit
+    // lands in the registry without waiting for a settings Apply. Startup
+    // only, after the instance guard (one resident process mutates it); a
+    // sync failure is a typed ERROR log and startup continues (spec §5).
+    #[cfg(windows)]
+    match autostart::sync(settings.general.autostart) {
+        Ok(()) => tracing::info!(
+            "autostart state synced from config (enabled: {})",
+            settings.general.autostart
+        ),
+        Err(err) => tracing::error!("autostart sync failed: {err} — startup continues"),
+    }
     // One toast-handle hand-off for the whole resident process (spec §4.3):
     // empty until the GUI attaches the `ToastService` handle in its create
     // closure; capture threads read a clone per trigger, so a capture fired
@@ -819,6 +840,10 @@ fn log_registrations(status: &hotkeys::StartStatus) {
 #[cfg(test)]
 #[path = "i18n.tests.rs"]
 mod i18n_tests;
+
+#[cfg(test)]
+#[path = "autostart.tests.rs"]
+mod autostart_tests;
 
 #[cfg(test)]
 #[path = "main.tests.rs"]

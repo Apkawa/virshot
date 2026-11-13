@@ -236,8 +236,8 @@ fn every_catalog_key_resolves_under_english() {
 
     assert_eq!(
         keys.len(),
-        95,
-        "locales/app.yml must declare exactly 95 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
+        97,
+        "locales/app.yml must declare exactly 97 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available + 2 autostart keys from task 2026-11-13_autostart: general.autostart_label/general.autostart_windows_only_note — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
     );
 
     for key in &keys {
@@ -355,8 +355,8 @@ fn every_catalog_key_has_all_six_locale_translations() {
     let entries = catalog_entries(&catalog_text());
     assert_eq!(
         entries.len(),
-        95,
-        "locales/app.yml must declare exactly 95 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
+        97,
+        "locales/app.yml must declare exactly 97 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available + 2 autostart keys from task 2026-11-13_autostart: general.autostart_label/general.autostart_windows_only_note — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
     );
 
     for (key, locales) in &entries {
@@ -521,8 +521,8 @@ fn all_six_locales_render_without_fallback_to_key_text() {
     let entries = catalog_entries(&catalog_text());
     assert_eq!(
         entries.len(),
-        95,
-        "locales/app.yml must declare exactly 95 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
+        97,
+        "locales/app.yml must declare exactly 97 shipped keys (82 shipped keys up to task 2026-11-10_about-dialog + 3 auto-update keys from task 2026-11-11_auto-update: general.update_channel_label/general.auto_install_label/general.update_check_never + 6 update-UI keys from task 2026-11-11_auto-update Stage 6: general.update_available_label/general.install_update_button/update.dialog_title/update.notes_loading/update.notes_unavailable/update.discovered_message + 3 update-UI keys from task 2026-11-11_auto-update Stage 9: update.section_title/update.check_label/update.check_now_button + 1 update-UI key from task 2026-11-11_auto-update Stage 11: update.no_updates_available + 2 autostart keys from task 2026-11-13_autostart: general.autostart_label/general.autostart_windows_only_note — Stage 9 replaced general.update_check_label with update.check_label and dropped it)"
     );
 
     for locale in SUPPORTED_LOCALES {

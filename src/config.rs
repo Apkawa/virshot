@@ -484,6 +484,12 @@ pub(crate) struct General {
     pub(crate) update_channel: UpdateChannel,
     /// Install an available update without asking (default `false`).
     pub(crate) auto_install: bool,
+    /// Start virshot automatically on Windows login (default `false`).
+    /// Windows-only option (task `2026-11-13_autostart`): the field exists
+    /// only under `#[cfg(windows)]`, so it is never serialized on other
+    /// targets and a foreign `autostart` key there is ignored.
+    #[cfg(windows)]
+    pub(crate) autostart: bool,
 }
 
 impl Default for General {
@@ -509,7 +515,39 @@ fn general_with_home(home: Option<&Path>) -> General {
         update_check: UpdateCheck::Day,
         update_channel: UpdateChannel::Stable,
         auto_install: false,
+        #[cfg(windows)]
+        autostart: false,
     }
+}
+
+/// UI access to the Windows-only `autostart` draft flag (task
+/// `2026-11-13_autostart`). The field itself exists only under
+/// `#[cfg(windows)]`, so `src/gui/` cannot name it without compile-time
+/// `#[cfg]` — the GUI modules must compile on Linux (see the pad-field
+/// precedent, runtime `cfg!(windows)` in `src/gui/hotkeys.rs`). This dual pair
+/// is the `src/gamepad.rs` gating template applied to a config field: under
+/// Windows it reads/writes the field, elsewhere it reads `false` and ignores
+/// writes, so the Linux tab paints a disabled placeholder and the flag can
+/// never dirty the draft (`chrome::is_dirty` compares `Settings` by
+/// `PartialEq`, and on Linux there is nothing to compare).
+#[cfg(windows)]
+impl General {
+    pub(crate) fn autostart(&self) -> bool {
+        self.autostart
+    }
+
+    pub(crate) fn set_autostart(&mut self, enabled: bool) {
+        self.autostart = enabled;
+    }
+}
+
+#[cfg(not(windows))]
+impl General {
+    pub(crate) fn autostart(&self) -> bool {
+        false
+    }
+
+    pub(crate) fn set_autostart(&mut self, _enabled: bool) {}
 }
 
 /// One capture trigger: keyboard hotkey plus optional gamepad button.

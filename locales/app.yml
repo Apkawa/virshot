@@ -192,6 +192,24 @@ general.auto_install_label:
   es: Instalar actualizaciones automáticamente
   ja: 更新を自動でインストール
   ko: 업데이트 자동 설치
+# NEW General-tab checkbox wording for the autostart task (2026-11-13_autostart):
+# the checkbox label plus the disabled placeholder shown on non-Windows hosts —
+# naming mirrors `gamepad.windows_only_note`. UI wiring lands in a later
+# stage, so there is no source literal yet.
+general.autostart_label:
+  en: Add to autostart
+  ru: "Добавить в автозагрузку"
+  zh-CN: 加入开机自动启动
+  es: Añadir al inicio automático
+  ja: 自動起動に追加
+  ko: 자동 시작에 추가
+general.autostart_windows_only_note:
+  en: "(autostart — Windows only)"
+  ru: "(автозагрузка — только Windows)"
+  zh-CN: "(自动启动 — 仅限 Windows)"
+  es: "(inicio automático — solo Windows)"
+  ja: "(自動起動 — Windows のみ)"
+  ko: "(자동 시작 — Windows 전용)"
 general.update_check_never:
   en: never
   ru: "никогда"

@@ -111,6 +111,13 @@ serde-saphyr = { version = "1.3.0", default-features = false, features = ["deser
 # product=2835).
 [target."cfg(windows)".dependencies]
 gamepad = { path = "crates/gamepad" }
+# Registry access for the HKCU Run autostart entry (task 2026-11-13_autostart,
+# approved by the user): winreg is pure Rust (compiles under x86_64-pc-windows-gnu
+# MinGW) and its 0.56.0 manifest declares NO default features — the optional
+# `transactions` and `serialization-serde` are never used here, so a plain
+# declaration is already feature-empty. Target-scoped like gamepad: on Linux
+# the dependency is not pulled in at all.
+winreg = "0.56"
 
 # Build-script half of shadow-rs (approved by the user): the `build` feature is what
 # makes `shadow_rs::ShadowBuilder::builder().build()` in build.rs generate the

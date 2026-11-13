@@ -2,7 +2,9 @@
 //! locale normalization, the placeholder reference rows derived from
 //! `template::TOKENS`, the format labels, the Browse folder-picker start rule,
 //! the update-interval dropdown's selected text, and the update row the tab
-//! paints — plus the `SettingsApp` methods that paint the tab and open the
+//! paints — plus the Windows-only autostart row at the bottom of the tab
+//! (task `2026-11-13_autostart`) and its disabled non-Windows placeholder —
+//! plus the `SettingsApp` methods that paint the tab and open the
 //! picker. Extracted from `gui/mod.rs` (GUI refactor); the save-gate
 //! tooltips, `Tab`, the bottom bar, and the hotkeys / overlay wiring live in
 //! `gui/app.rs`, the corner label (`position_label`) in `gui/overlay.rs`, as do
@@ -144,6 +146,21 @@ fn update_check_selected_text(check: config::UpdateCheck) -> String {
         config::UpdateCheck::Day => "1d".to_owned(),
         config::UpdateCheck::Week => "1w".to_owned(),
     }
+}
+
+/// Label of the autostart checkbox (catalog `general.autostart_label`, task
+/// `2026-11-13_autostart`). A catalog lookup helper, like
+/// `binding::gamepad_placeholder_label()`: the wording is pinned by tests
+/// against the shipped catalog, not against a literal in the paint code.
+fn autostart_label() -> String {
+    rust_i18n::t!("general.autostart_label").into_owned()
+}
+
+/// Text of the disabled autostart placeholder on hosts without the HKCU `Run`
+/// registry (catalog `general.autostart_windows_only_note` — naming mirrors
+/// `gamepad.windows_only_note`, same Windows-only-option convention).
+fn autostart_placeholder_label() -> String {
+    rust_i18n::t!("general.autostart_windows_only_note").into_owned()
 }
 
 impl SettingsApp {
@@ -370,6 +387,38 @@ impl SettingsApp {
             if open_dialog {
                 self.open_update_dialog();
             }
+        }
+
+        // ── «Autostart» group (spec §4.4, task 2026-11-13_autostart) ──
+        // The bottom group of the tab, below the Update rows. The draft flag
+        // is Windows-only (`config::General::autostart`, `#[cfg(windows)]`),
+        // so the row reads/writes it through the dual accessors in
+        // `config.rs` instead of naming the field: `src/gui/` has no
+        // compile-time `#[cfg]` and must compile on Linux, exactly like the
+        // pad field's runtime `cfg!(windows)` split in `gui/hotkeys.rs:547`.
+        // Draft semantics are untouched — the write lands in `draft.general`
+        // like any other field, so dirty detection stays the plain
+        // draft-vs-applied `PartialEq` (`chrome::is_dirty`), no special case.
+        // Apply persists it (`config::save` on Windows) and syncs the registry
+        // from the saved draft (`autostart::sync` in `gui/app.rs::apply`); a
+        // manual config edit lands in the registry at startup (`main.rs`).
+        ui.separator();
+        if cfg!(windows) {
+            let mut autostart = self.draft.general.autostart();
+            ui.checkbox(&mut autostart, autostart_label());
+            // Write-back of the (possibly toggled) value; on a frame with no
+            // press it writes the value it just read, so the draft is a no-op.
+            self.draft.general.set_autostart(autostart);
+        } else {
+            // Disabled placeholder, the exact mechanism of the pad-field
+            // placeholder (`ui.add_enabled(false, …)`, `gui/hotkeys.rs:574-577`):
+            // a disabled widget that never reacts to clicks, so the flag stays
+            // `false` and the registry is never touched on Linux.
+            let mut placeholder = false;
+            ui.add_enabled(
+                false,
+                egui::Checkbox::new(&mut placeholder, autostart_placeholder_label()),
+            );
         }
     }
 

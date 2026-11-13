@@ -65,6 +65,22 @@
 > приложения теперь есть — только GitHub Releases и GitHub API для описания
 > релиза, без телеметрии (§5). Каталог локалей — 95 ключей (§10). Приёмка
 > self-replace/перезапуска на Windows отложена (§10).
+> Обновлено 2026-11-13 (v11, task `2026-11-13_autostart`): автозагрузка на
+> Windows — чекбокс «Добавить в автозагрузку» последней группой на вкладке
+> General (§4.4) + синхронизация с реестром при сохранении и старте: HKCU
+> `Software\Microsoft\Windows\CurrentVersion\Run`, значение `virshot`, данные —
+> путь exe в двойных кавычках; включено → запись, выключено → удаление,
+> совпадающее значение не переписывается (идемпотентно). Apply/OK
+> синхронизирует после `config::save` без перезапуска, Cancel реестр не
+> трогает; ручная правка `config.toml` попадает в реестр на старте
+> резидентного процесса (после single-instance guard), headless `virshot shot`
+> не синхронизирует (§4.4, §8). Ошибка реестра — ERROR в лог, сохранение и
+> старт продолжаются (§5), тоста нет. Опция Windows-only: на Linux ключ
+> `autostart` не попадает в `config.toml` и игнорируется при чтении (§7), в UI
+> — disabled placeholder «(автозагрузка — только Windows)». Бэкенд — `winreg`
+> (target-scoped `cfg(windows)`, new crates.io dep — approved пользователем).
+> Каталог локалей — 97 ключей (§10). Автозапуск при логине вынесен из
+> «Не входит в MVP» (§2).
 > Разделы, отмеченные **⏳ (ожидает research)**, закрыты по итогам Stages 6-12:
 > eframe multi-viewport оверлей, tray-icon (ksni), global-hotkey, xcap —
 > реализованы; геймпад-триггер (Windows) реализован (v5), Linux — вне scope.
@@ -131,10 +147,9 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
 - Запись видео / Replay Buffer.
 - Встроенный редактор изображений.
 - Эксклюзивный полный экран — документированное ограничение (см. §9).
-- Автозапуск при логине.
 - Пользовательская иконка трея (в MVP — встроенная).
 - i18n — UI локализован (реализовано 2026-11-06, v9): `rust-i18n` 4.2.4, каталог
-  в одном файле `locales/app.yml` с `_version: 2` (76 ключей, вложенные блоки
+  в одном файле `locales/app.yml` с `_version: 2` (97 ключей, вложенные блоки
   локалей под каждым ключом), локали `en`/`ru`/`zh-CN`/`es`/`ja`/`ko`; выбор
   языка — dropdown в General (§4.4), смена языка без перезапуска (§4.4, §4.5).
   Не переводятся: ключи конфига, CLI-текст (`--help`, stdout/stderr) и логи —
@@ -225,6 +240,14 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
   `self-replace` 1.5.1 (default features) — in-place замена работающего
   бинарника (`cfg(windows)`-зависимости уже локнулись). Все crate'ы
   feature-trimmed ради бюджета §5 (пересмотрен на < 12 МБ, §4.7).
+- **Автозагрузка (Windows — реализовано 2026-11-13, v11):** `winreg` 0.56 — доступ к
+  реестру HKCU (`Software\Microsoft\Windows\CurrentVersion\Run`) для автозагрузки
+  (§4.4, §8). new crates.io dep — approved пользователем в task
+  `2026-11-13_autostart`. Target-scoped как `gamepad`:
+  `[target."cfg(windows)".dependencies]` — на Linux зависимость не pull-ится вообще.
+  Pure Rust, MinGW-совместима (компилируется под `x86_64-pc-windows-gnu`).
+  Feature-empty: у 0.56 нет default features, опциональные `transactions` и
+  `serialization-serde` не используются — plain-декларация уже feature-empty (§5).
 - **Конфигурация:** `serde` + `toml`.
 - **Логирование:** `tracing` + `tracing-subscriber` (файловый appender).
 - **CLI:** `clap`.
@@ -475,6 +498,24 @@ Windows; Linux вне scope, §9). Основная цель — заменит�
      `template::TOKENS` (11 токенов с описаниями) — это справка, не контроль;
      отдельной валидации шаблона в UI нет (§4.2).
    - Формат файла; `jpeg_quality`; `webp_quality`.
+   - Автозагрузка (v11, Windows-only): последняя группа вкладки после группы
+     «Обновление» (§4.7), отделена `separator` (`src/gui/general.rs`) — чекбокс
+     «Добавить в автозагрузку» (`general.autostart_label`) правит
+     `general.autostart` (§7); на хостах без HKCU `Run` — disabled placeholder
+     «(автозагрузка — только Windows)» (`general.autostart_windows_only_note`,
+     runtime `cfg!(windows)` — тот же механизм, что placeholder поля `pad`,
+     §4.1), флаг остаётся `false`. Реестр: HKCU
+     `Software\Microsoft\Windows\CurrentVersion\Run`, значение `virshot`,
+     данные — путь к exe в двойных кавычках; чекбокс включён → запись,
+     выключен → удаление значения; совпадающее значение не переписывается —
+     синхронизация идемпотентна. Apply/OK синхронизирует после `config::save`
+     (`src/gui/app.rs` `apply`) без перезапуска; Cancel реестр не трогает.
+     Ручная правка `config.toml` попадает в реестр при старте резидентного
+     процесса (`src/main.rs` `run_resident`, после single-instance guard);
+     headless `virshot shot` не синхронизирует (§8). Ошибка реестра — ERROR в
+     лог, сохранение и старт продолжаются (§5), тоста нет. На Linux доступа к
+     реестру нет: ключ не попадает в `config.toml` и игнорируется при чтении
+     (§7).
 2) **Вкладка "Hotkeys":**
    - 3 колонки в одном `egui::Grid` (Действие | клавиша | геймпад): колонки
      выровнены по всей вкладке, кнопка бинда — фиксированная минимальная
@@ -909,6 +950,7 @@ webp_quality = 90
 update_check   = "1d"      # never | 1h | 1d | 1w (дефолт 1d; неизвестное значение → дефолты всего конфига, §4.7)
 update_channel = "stable"  # stable | nightly (дефолт stable; неизвестное значение → дефолты всего конфига, §4.7)
 auto_install   = false     # ставить обновление без окна (§4.7)
+autostart    = false     # автозагрузка на Windows (HKCU Run, значение virshot, §4.4); на Linux ключ не попадает в config.toml и игнорируется
 
 [controls.full_screen]
 key  = "PrintScreen"
@@ -1074,12 +1116,13 @@ probe press dropped: <key> has no bindable name». DEBUG видны с
 
 - **Юнит-тесты:** шаблон пути, санитизация, валидация, парсинг/дефолты конфига.
 - **Юнит-тесты i18n (v9):** форма каталога — один файл `locales/app.yml` с
-  `_version: 2`; полнота всех шести локалей на всех 95 ключах (82 до About +
+  `_version: 2`; полнота всех шести локалей на всех 97 ключах (82 до About +
   13 ключей автообновления: 3 конфига (`general.update_check_never`,
   `general.update_channel_label`, `general.auto_install_label`), 6 UI из Stage 6,
   3 UI из Stage 9 — `general.update_check_label` снят как мёртвая формулировка
   и заменён на `update.check_label`, 1 UI из Stage 11 —
-  `update.no_updates_available`); пин нового ключа Stage 11 на всех шести
+  `update.no_updates_available`; 2 ключа автозагрузки — `general.autostart_label`
+  и `general.autostart_windows_only_note`); пин нового ключа Stage 11 на всех шести
   локалях с точным `ru` «Обновлений нет» (текст ошибки проверки не
   локализуется — verbatim-английское сообщение `UpdateError`); целостность
   `%{...}`-плейсхолдеров во всех локалях; рендер всех локалей без
