@@ -30,6 +30,8 @@ fn main() {
     // Re-stamp when this script changes; shadow-rs emits its own rerun
     // directives for the timestamp sources.
     println!("cargo:rerun-if-changed=build.rs");
+
+    windows_exe_info::icon::icon_ico("crates/icons/assets/ico/app.ico");
 }
 
 /// ISO-8601 `YYYY-MM-DDTHH:MM:SS+03:00` for the current moment, std only.

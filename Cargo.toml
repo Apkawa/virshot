@@ -128,6 +128,7 @@ winreg = "0.56"
 # dependency above.
 [build-dependencies]
 shadow-rs = { version = "2.0.0", default-features = false, features = ["build"] }
+windows_exe_info = "0.5"
 
 [dev-dependencies]
 rusty-hook = "^0.11.2"

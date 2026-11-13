@@ -3,11 +3,17 @@
        tray glyph in src/tray.rs. Palette matches tray.rs: body #505050,
        lens ring #c8c8c8, lens core #181818. No background rect: the
        corners stay transparent so the rasterized PNG keeps alpha. -->
-  <!-- Viewfinder bump (top-left), drawn before the body so the body edge
-       overlaps its bottom half, like the tray glyph. -->
-  <rect x="32" y="16" width="56" height="28" rx="6" fill="#505050"/>
-  <!-- Camera body. -->
-  <rect x="12" y="32" width="104" height="88" rx="10" fill="#505050"/>
+  <!-- Camera silhouette: body (rounded rect rx=10) plus the viewfinder bump
+       (rx=6) as ONE merged outline path, so the bump sits on the body without
+       a stroke seam across it — the same union the two stacked rects made.
+       The #c8c8c8 outline (same color as the lens ring) is what makes the
+       glyph readable on a dark tray background, where the #505050 body alone
+       disappears. stroke-width=6 is ~1.2px at the 22-24px tray size the hosts
+       downscale the 128px asset to. -->
+  <path d="M22 32 H32 V22 A6 6 0 0 1 38 16 H82 A6 6 0 0 1 88 22 V32 H106
+           A10 10 0 0 1 116 42 V110 A10 10 0 0 1 106 120 H22
+           A10 10 0 0 1 12 110 V42 A10 10 0 0 1 22 32 Z"
+        fill="#505050" stroke="#c8c8c8" stroke-width="8" stroke-linejoin="round"/>
   <!-- Lens: light ring with a dark core, centered inside the body. -->
   <circle cx="66" cy="64" r="26" fill="#c8c8c8"/>
   <circle cx="66" cy="64" r="14" fill="#181818"/>

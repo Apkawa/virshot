@@ -11,6 +11,7 @@ cd "$here"
 
 SVG_DIR="crates/icons/assets/svg"
 PNG_DIR="crates/icons/assets/png"
+ICO_DIR="crates/icons/assets/ico"
 RASTER_W=128
 RASTER_H=128
 
@@ -21,12 +22,18 @@ if ! command -v rsvg-convert >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v convert >/dev/null 2>&1; then
+  echo "gen-icons.sh: convert not found — install imagemagick" >&2
+  exit 1
+fi
+
 if [ ! -d "$SVG_DIR" ]; then
   echo "gen-icons.sh: no SVG sources in $SVG_DIR — nothing to generate"
   exit 0
 fi
 
 mkdir -p "$PNG_DIR"
+mkdir -p "$ICO_DIR"
 
 count=0
 for src in "$SVG_DIR"/*.svg; do
@@ -42,9 +49,24 @@ for src in "$SVG_DIR"/*.svg; do
   count=$((count + 1))
 done
 
+count=0
+for src in "$SVG_DIR"/*.svg; do
+  # With no match the glob stays literal, so skip it rather than feed it to the tool.
+  if [ ! -f "$src" ]; then
+    continue
+  fi
+  out="$ICO_DIR/$(basename "$src" .svg).ico"
+  if ! convert "$src" -define "icon:auto-resize=256,128,64,48,32,16" "$out" ; then
+    echo "gen-icons.sh: convert failed on $src" >&2
+    exit 1
+  fi
+  count=$((count + 1))
+done
+
 if [ "$count" -eq 0 ]; then
   echo "gen-icons.sh: no SVG sources in $SVG_DIR — nothing to generate"
   exit 0
 fi
 
 echo "gen-icons.sh: generated $count PNG asset(s) at ${RASTER_W}x${RASTER_H} into $PNG_DIR"
+echo "gen-icons.sh: generated $count ICO asset(s) into $ICO_DIR"
