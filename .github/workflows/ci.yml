@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -12,20 +12,25 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
-  actions: write
+  contents: write # Даем права на создание релизов
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Если это тег - берем его, иначе 'nightly'
+  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'nightly' }}
 
 jobs:
+  # ==========================================
+  # 1. ТЕСТЫ (Запускаются всегда: PR, push, tags)
+  # ==========================================
   linux:
     name: Linux x86_64 — fmt / check / test / clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install native dev packages (xcap / eframe GL chain)
+      - name: Install native dev packages
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -37,7 +42,7 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: Run workspace tests
         run: cargo test --workspace
-      - name: Clippy (warnings are errors)
+      - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   windows:
@@ -47,20 +52,145 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run workspace tests
         run: cargo test --workspace -- --skip 'cli_headless::'
-      - name: Clippy (warnings are errors)
+      - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # ==========================================
+  # 2. СБОРКА БИНАРНИКОВ (Только для master или tags)
+  # ==========================================
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [linux, windows] # Ждем успешных тестов!
+    # Запускаем только если это не PR (т.е. push в master или tag)
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            binary: virshot.exe
+            key: win-x64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary: virshot
+            key: linux-x64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dev packages (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libegl1-mesa-dev libgbm-dev libudev-dev \
+            libwayland-dev libpipewire-0.3-dev libclang-dev
+      - name: Add build target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.key }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 5
+
+  # ==========================================
+  # 3. ПАКЕТИРОВАНИЕ И РЕЛИЗ
+  # ==========================================
   release:
-    name: Release trigger
-    needs: [linux, windows]
+    name: Package and publish
+    needs: [build] # Ждем успешной сборки
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Release on Tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Для git-cliff
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-win-x64
+          path: binaries/win-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-linux-x64
+          path: binaries/linux-x64
+
+      - name: Resolve build kind
+        id: kind
         run: |
-          gh workflow run release.yml \
-            --repo "${{ github.repository }}" \
-            --ref ${{ github.ref_name }} \
-            --field tag=${{ github.ref_name }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "kind=release" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=nightly" >> "$GITHUB_OUTPUT"
+            echo "tag=nightly" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install git-cliff
+        run: cargo install git-cliff --version 2.14.2 --no-default-features
+
+      - name: Generate release notes
+        run: |
+          mkdir -p dist
+          if [ "${{ steps.kind.outputs.kind }}" = "release" ]; then
+            git-cliff --latest -o dist/notes.md
+          else
+            git-cliff --unreleased -o dist/notes.md
+          fi
+
+      - name: Package archives
+        run: |
+          ./scripts/package-release.sh \
+            --binaries binaries \
+            --version "${{ steps.version.outputs.version }}" \
+            --kind "${{ steps.kind.outputs.kind }}" \
+            --sha "$(git rev-parse --short HEAD)" \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "${{ steps.kind.outputs.tag }}" \
+            --out dist
+
+      - name: Publish release via gh
+        run: |
+          tag="${{ steps.kind.outputs.tag }}"
+          kind="${{ steps.kind.outputs.kind }}"
+          assets=(dist/*.zip dist/*.tar.gz dist/release.yaml)
+          notes=(--notes "See release.yaml for artifacts, sha512 checksums and sizes.")
+          if [ -f dist/notes.md ]; then
+            notes=(--notes-file dist/notes.md)
+          fi
+          prerelease=()
+          if [ "$kind" = "nightly" ]; then
+            prerelease=(--prerelease)
+
+            # Для nightly принудительно двигаем тег на текущий коммит через API
+            # (это обходит ошибку 403, так как не меняет файлы workflow)
+            gh api --method PATCH "repos/${{ github.repository }}/git/refs/tags/nightly" \
+              -f sha="$(git rev-parse HEAD)" -F force=true 2>/dev/null || \
+            gh api --method POST "repos/${{ github.repository }}/git/refs" \
+              -f ref="refs/tags/nightly" -f sha="$(git rev-parse HEAD)"
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$kind" = "nightly" ]; then
+              gh release view "$tag" --json assets --jq '.assets[].name' | while read -r asset; do
+                [ -n "$asset" ] && gh release delete-asset "$tag" "$asset" --yes
+              done
+            fi
+            # Для обычных релизов убираем --target (тег уже есть), чтобы не ловить 403
+            gh release upload "$tag" "${assets[@]}"
+            gh release edit "$tag" "${notes[@]}"
+          else
+            # Убрали --target полностью! Тег уже существует при пуше.
+            # А для nightly мы его только что создали/обновили через API.
+            gh release create "$tag" \
+              "${prerelease[@]}" "${notes[@]}" "${assets[@]}"
+          fi
