@@ -1,9 +1,15 @@
+## [0.1.2] - 2026-11-13
+
+### ⚙️ Miscellaneous Tasks
+
+- Try fix release wf
 ## [0.1.1] - 2026-11-13
 
 ### ⚙️ Miscellaneous Tasks
 
 - Change release message
 - Fix ci wf tags
+- *(release)* V0.1.1
 ## [0.1.0] - 2026-11-13
 
 ### 🚀 Features
