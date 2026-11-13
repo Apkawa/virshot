@@ -1,162 +1,70 @@
-# VIRShot
+English | [Russian](./README.ru.md) | [中文](./README.zh.md)
 
-Сверхлёгкая утилита снимков экрана для Windows (целевой — <10 МБ в exe).
-Главная цель — заменить тяжёлые комбайны вроде ShareX: глобальные хоткеи,
-снимок сразу на диск, уведомительный тост с именем файла, трей, минимальные
-настройки. Linux — dev-хост (capture + CLI работают; хоткеи и трей — только X11/D-Bus).
+# ViRShot - Vibe Rust Shot
 
-## Запуск на Windows
+![ViRShot icon](./crates/icons/assets/png/app-128.png)
 
-Поставка — GitHub Releases: релизы тега `v*` с архивами
-`virshot-v<version>-win-x64.zip` (`virshot.exe`, сборка
-`x86_64-pc-windows-msvc`) и `virshot-v<version>-linux-x64.tar.gz` (`virshot`,
-`x86_64-unknown-linux-gnu`) плюс `release.yaml` — список файлов с полным
-download URL, `sha512` (base64) и размером. rolling prerelease `nightly`
-собирается с любого коммита `master` и обновляется на месте:
-`virshot-v<version>-nightly-<shortsha>-win-x64.zip` /
-`virshot-v<version>-nightly-<shortsha>-linux-x64.tar.gz` (старые ассеты
-удалены, target-коммит перенесён). Архивы содержат только бинарь, без
-инсталлера.
+ViRShot is a cross-platform screenshot utility written in Rust
 
-Dev-путь — exe прямо из билда
-(`target/x86_64-pc-windows-gnu/release/virshot.exe`, gnu-кросс-билд), запуск
-из папки билда. Двойной клик по exe не открывает чёрного окна консоли
-(PE subsystem `WINDOWS`) — запуск молча, процесс уходит в трей. CLI
-`virshot shot` пишет stdout только при запуске из уже открытой консоли
-(cmd/PowerShell).
-Portable: без инсталлера, без реестра (единственный реестровый контакт —
-автозагрузка на Windows: opt-in чекбокс «Добавить в автозагрузку» на вкладке
-General, значение `virshot` в HKCU `Run`, по умолчанию выключен) — файлы
-программы живут рядом с exe (см. «Конфиг и лог»). При первом запуске
-конфиг создаётся автоматически,
-процесс остаётся резидентным в фоне (трей). Выход — только из трей-меню
-(`Exit`).
+The goal is a lightweight utility that supports gamepad buttons without [Xbox Button Remapper](https://github.com/Adam777Z/xbox-controller-button-remapper). This feature apparently didn't exist in other similar projects
 
-## Хоткеи по умолчанию
+## Features
 
-- `PrintScreen` — весь экран;
-- `Alt+PrintScreen` — активное (foreground) окно, даже если оно перекрыто
-  другими окнами (имя окна попадает в имя файла через `%t`);
-- `Ctrl+PrintScreen` — снимок области по рамке: зарезервировано, вне MVP.
+- Gamepad button assignment
+- Filename templates, including the window title
+- Saving to png, jpeg, webp
+- A message is shown on all monitors when a screenshot is taken
+- A yellow border around the window or screen during a screenshot - this is a quirk of how **Windows Graphics Capture (WGC)** works
+- Translations into English, Russian, Simplified Chinese, Spanish, Japanese, Korean.
+- Auto-update (can be disabled)
+- Adding to autostart (can be disabled)
+- Windows, Linux (not tested)
 
-Если Windows 11 использует `PrintScreen` для Snipping Tool, отключите эту
-настройку ОС или перепривяжите хоткей в окне настроек.
 
-Нотация в конфиге:
+## Download
 
-```toml
-[controls.window]
-key = "PrintScreen"      # PrintScreen, A–Z, 0–9, F1–F12
-mods = ["Alt"]           # Alt, Ctrl, Shift, Win — списком; регистр не важен,
-                         # Win принимается также как Windows/Command/Meta/Super
-```
+Download from the [releases page](https://github.com/Apkawa/virshot/releases/)
 
-## Трей-меню
+- [nightly](https://github.com/Apkawa/virshot/releases/tag/nightly) - every commit on master ends up there
+- [stable](https://github.com/Apkawa/virshot/releases/latest) - stable release
 
-- **Take screenshot** — снимок всего экрана;
-- **Settings** — окно настроек (если окно было скрыто крестиком — открывается снова);
-- **Exit** — единственный способ завершить процесс; крестик окна только прячет
-  окно, процесс остаётся в трее (хоткеи живы).
+## Installation and running
 
-## Окно настроек
+The program is distributed in portable mode. Unpack it into the folder you want and run it; the config will be located next to the exe.
 
-Вкладки **General / Hotkeys / Overlay**. Правки без **Apply** сбрасываются при
-закрытии; **Apply** пишет `config.toml` и мгновенно перерегистрирует хоткеи
-(новая комбинация работает сразу, старая освобождена). Язык UI — английский.
+There is no certificate, so Defender SmartScreen will show a message like "Windows protected your PC". Select "More info" and run it anyway.
 
-**Hotkeys** — три строки (`Full screen`, `Window`, `Rect area`): поле бинда =
-кнопка с текущим биндом (напр. `Alt+PrintScreen`). Клик по кнопке → bind-by-press:
-нажмите новую комбинацию — она заменяет бинд; `Esc` (или повторный клик по
-кнопке) отменяет. Селект клавиши и чекбоксы модификаторов убраны.
+## Assigning gamepad buttons
 
-- Модификатор `Win` из UI недостижим (winit не отдаёт Super) — задаётся правкой
-  `config.toml`.
-- Ошибка регистрации (конфликт с другим приложением и т.п.) —
-  значок `!` справа от поля, причина — в тултипе; зарезервированный `Rect area`
-  — значок `i` («reserved — out of MVP scope»). Статусы каждого хоткея — также
-  в `virshot.log`.
-- Во время захвата бинда (режим кнопки «Press keys…») все глобальные хоткеи
-  временно приостановлены: нажатия доходят до окна, PrintScreen не делает
-  снимок; после фиксации бинда или отмены (`Esc`) прежние бинды
-  восстанавливаются. Голый `PrtScn` в режиме захвата всё равно копирует экран
-  в буфер обмена — это поведение Windows по умолчанию, не VIRShot.
-- Поле геймпада справа — на Windows активное: клик → «Press a button…», первый
-  DOWN фиксирует бинд (`unknown:<N>` / `Guide` / `Share`), отмена — повторный
-  клик по тому же полю (Esc относится только к клавиатурному захвату); во время
-  захвата геймпад-выстрелы подавлены, хоткеи остаются активны. На хосте без
-  GameInput — disabled placeholder «(gamepad — Windows only)».
-- Если на этом хосте глобальные хоткеи недоступны — строка
-  «Hotkeys unavailable on this host (see log)».
+First you need to disable **Xbox Game Bar**
 
-## Конфиг и лог
+- Remapping the Xbox button only works when the **Open Game Bar using Xbox button on a controller** setting is disabled:\
+  [Enable or Disable Open Game Bar using Xbox button on Controller in Windows 10](https://www.tenforums.com/tutorials/138967-enable-disable-open-xbox-game-bar-using-controller-windows-10-a.html)\
+  [Enable or Disable Open Game Bar using Xbox button on Controller in Windows 11](https://www.elevenforum.com/t/enable-or-disable-open-game-bar-using-xbox-button-on-controller-in-windows-11.4290/)
 
-- **Windows — portable режим:** `config.toml` и `virshot.log` рядом с
-  `virshot.exe` (в папке билда). Если каталог exe неписуемый,
-  fallback — `%APPDATA%\virshot\` (в логе — WARN с новым путём); если и
-  `%APPDATA%` не задан — `./virshot/config.toml` относительно каталога запуска.
-- **Linux:** `~/.config/virshot/config.toml` (XDG; `XDG_CONFIG_HOME` учитывается).
-- Переопределение — `--config <path>` и `--log <path>`; лог (`virshot.log`) и
-  lock-файл единственного экземпляра (`config.toml.lock`) — рядом с конфигом.
-- Если файла нет — при старте деплоятся дефолты; битый файл — ERROR в лог,
-  приложение всё равно работает на дефолтах (файл не переписывается).
+- Remapping the Share button only works when the **Windows Game Recording and Broadcasting** features are disabled:\
+  [Enable or Disable Windows Game Recording and Broadcasting in Windows 10](https://www.tenforums.com/tutorials/51180-enable-disable-windows-game-recording-broadcasting-windows-10-a.html)\
+  [Enable or Disable Windows Game Recording and Broadcasting in Windows 11](https://www.elevenforum.com/t/enable-or-disable-game-recording-for-captures-in-windows-11.17611/)
 
-## Сохранение снимков
+Tested on an Xbox Series X gamepad. Other gamepads were not tested, but in principle they should work.
 
-- Куда: по умолчанию `%USERPROFILE%\Pictures\Screenshots` (Linux —
-  `~/Pictures/Screenshots`); дефолт резолвится из домашней директории при
-  старте. Поле **Save path** правится руками; кнопка **Browse** — стандартный
-  диалог выбора папки (стартовая папка: текущий `save_path`, если он существует,
-  иначе `…\Pictures`). Windows — native диалог; Linux требует xdg-desktop-portal,
-  иначе fallback `zenity` — без бэкенда диалог недоступен (WARN в логе), поле
-  правится руками. Выбранная папка применяется после **Apply**.
-- Форматы: `png`, `jpg`, `webp`; `jpeg_quality` (в UI — 1–100) применяется к JPEG.
-  В MVP webp lossless — `webp_quality` не применяется.
-- Шаблоны имени и подпапки (каждый сегмент — подпапка или имя файла):
-  токены `%Y %y %mo %d %H %M %S %iso %t %n %ext` — `%iso` → `2026-11-03_00-12-05`,
-  `%t` → имя окна (обрезка до ~60 символов), `%ext` → расширение формата.
-  По умолчанию: весь экран `FullScreen/%y-%mo/%y-%mo-%d/%iso.%ext`,
-  окно `%t/%y-%mo/%y-%mo-%d/%t-%iso.%ext`.
-- Файл с таким именем уже есть → суффикс `-2`, `-3`, … перед расширением.
-- Тост появляется только после снимка: успех — `Saved: <имя файла>`,
-  ошибка — текст ошибки (Overlay: позиция, длительность). Позиция в углу —
-  эмпирические отступы: 30 px от вертикальной границы экрана, 60 px от
-  горизонтальной (нижние углы — над панелью задач). Окно тоста рисуется до
-  показа: белая «тень» DWM до первой отрисовки больше не появляется. По
-  умолчанию `on_all_monitors = true` — по одному тосту на каждом мониторе в
-  настроенном углу; с `false` — один тост на основном мониторе. Если тост
-  не появился — проверьте INFO-строку «Toast shown on ...» в `virshot.log`.
 
-## CLI
+## Roadmap
 
-```
-virshot shot [--window] [--out <path>] [--format png|jpg|webp]
-```
+- [ ] Video recording with playback (obs)
+- [ ] Area screenshot #2
+- [ ] Image editor #3
+- [ ] Additional languages + proofreading
+  * [ ] Hindi
+  * [ ] Arabic
+  * [ ] French
+  * [ ] Bengali
+  * [ ] German
+  * [ ] Indonesian
 
-Один снимок без GUI/трея/тоста: полный путь сохранённого файла в stdout,
-exit 0; ошибка — текст в stderr, exit 1. `--out` — точный путь файла
-(шаблон имени переопределяется); `--format` переопределяет формат из конфига,
-имя остаётся из `--out`.
 
-Глобальные опции: `--config <path>`, `--log <path>`, `--log-level <level>`
-(case-insensitive; прочее — usage-error, exit 2), `--version`, `--help`.
+## Similar projects
 
-## Единственный экземпляр
-
-Один резидентный процесс на конфиг. Второй запуск — понятная ошибка с pid
-живого процесса и exit 1 (ни трей, ни хоткеи не создаются). Если процесс был
-убит извне (lock-файл `config.toml.lock` остался), следующий запуск
-восстанавливает lock. Headless `virshot shot` lock не использует — это
-одноразовый CLI для скриптов и тестов.
-
-## Ограничения MVP
-
-- webp только lossless (качество не применяется);
-- на Wayland тост игнорирует position и always-on-top;
-- Linux: хоткеи и трей только X11/D-Bus — на Wayland глобальные хоткеи не работают;
-- прозрачность тоста на X11 — ограничение сборки (тост без прозрачного фона);
-- `Win` как модификатор хоткея — только через `config.toml` (см. «Окно настроек»);
-- геймпад — только Windows (`gameinput.dll`): на Linux триггер не работает
-  (`gilrs` вне scope — аппаратная находка), поле `pad` в UI неактивен;
-  нестандартные кнопки — raw-номер `unknown:<N>` с меткой из device-info блока;
-  Xbox Game Bar перехватывает Share, поведение Share/Guide на реальном железе
-  ещё не проверено (см. docs/spec.md §9).
+- [greenshot](https://github.com/greenshot/greenshot)
+- [ShareX](https://github.com/ShareX/ShareX)
+- [flameshot](https://github.com/flameshot-org/flameshot)
