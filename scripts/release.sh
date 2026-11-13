@@ -32,14 +32,18 @@ resolve_cliff() {
 
 # Rewrite the `version = "..."` line inside [package] only — dep tables elsewhere
 # have inline `version =` keys that must stay untouched; other lines print verbatim.
+# The error is about a MISSING version line (awk exit status), not about an
+# unchanged file: the first release bumps nothing — git-cliff reports the
+# `initial_tag` verbatim when no tags exist yet, so writing the same version back
+# is a legitimate no-op.
 rewrite_cargo_version() { # $1: bare version, e.g. 0.2.0
   local tmp="$ROOT/Cargo.toml.tmp.$$"
-  awk -v ver="$1" '
+  if ! awk -v ver="$1" '
     /^[[:space:]]*\[/ { inpkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/) }
-    inpkg && /^version[[:space:]]*=/ { print "version = \"" ver "\""; next }
+    inpkg && /^version[[:space:]]*=/ { print "version = \"" ver "\""; found = 1; next }
     { print }
-  ' "$ROOT/Cargo.toml" > "$tmp"
-  if cmp -s "$ROOT/Cargo.toml" "$tmp"; then
+    END { exit !found }
+  ' "$ROOT/Cargo.toml" > "$tmp"; then
     rm -f "$tmp"
     err "no version line found in the [package] section of Cargo.toml"
   fi
