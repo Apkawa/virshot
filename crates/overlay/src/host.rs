@@ -24,11 +24,25 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::content::{ImageCache, OverlayContent, paint};
 use crate::error::OverlayError;
 use crate::placement::{MonitorRect, Rect};
 use crate::{OverlayId, OverlayWindowSpec};
+
+/// Steady-state repaint cadence for overlay chips painted on the host loop.
+///
+/// A chip whose content, placement and visibility are unchanged needs no GPU work
+/// per host pass, so `paint` schedules its next repaint after this interval
+/// (~5 fps) instead of demanding one every pass — a toast sitting in `Hold` used
+/// to spin the host loop at full rate. Event-driven wakes stay immediate
+/// (`drain`: spawn, redraw/fade ticks; placement/DPI correction, first paint),
+/// so animation and window changes never inherit this delay. egui keeps the
+/// EARLIEST scheduled repaint (strict `delay < repaint_delay`), so a delayed
+/// request yields exactly one repaint: `paint` re-issues it each pass to keep a
+/// steady chip alive.
+const REPAINT_INTERVAL: Duration = Duration::from_millis(200);
 
 /// A command for the host loop, queued by [`OverlayHostHandle`] and drained by
 /// [`OverlayHost::update`] on the host thread.
@@ -79,6 +93,12 @@ struct PaintState {
     painted: AtomicBool,
     /// `ViewportCommand::ContentProtected` is a window attribute, sent once.
     protection_sent: AtomicBool,
+    /// Set once `ViewportCommand::Visible(true)` has been sent: the chip is on
+    /// screen, so the show sequence is not re-sent, because every
+    /// `Context::send_viewport_cmd_to` pins this viewport's repaint delay to ZERO
+    /// and deduplicates the delayed request of the same pass (the throttle needs
+    /// commands only on a value change).
+    shown: AtomicBool,
 }
 
 /// One live overlay: its spec plus the paint state the viewport shares.
@@ -103,6 +123,7 @@ impl HostWindow {
                 alpha: AtomicU32::new(alpha.to_bits()),
                 painted: AtomicBool::new(false),
                 protection_sent: AtomicBool::new(false),
+                shown: AtomicBool::new(false),
             }),
             applied_ppp: None,
         }
@@ -264,8 +285,17 @@ impl OverlayHost {
                         .paint
                         .alpha
                         .store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
-                    // The per-viewport repaint request is issued by `paint`, which
-                    // gates it on the viewport having a real window.
+                    // A repaint of the root loop does NOT wake a Deferred child
+                    // viewport, so a fade tick must wake the chip's own window —
+                    // otherwise the 25 ms fade animation stalls. Same window-less
+                    // hazard as in `Spawn`: `request_repaint_of` on a viewport with
+                    // no window pins `repaint_delay` to ZERO and deduplicates every
+                    // later request, so it is guarded by the window being present.
+                    if ctx.input(|input| input.raw.viewports.contains_key(&window.viewport)) {
+                        ctx.request_repaint_of(window.viewport);
+                    }
+                    // The host loop wakes too, so `paint` re-registers the chip on
+                    // this pass and keeps the steady throttle re-issued.
                     ctx.request_repaint();
                 }
                 OverlayCommand::Hide { id } => {
@@ -425,10 +455,11 @@ impl OverlayHost {
             // rect the OS actually gave the window, in that window's POINTS;
             // multiplied by the same pixels-per-point the commands use, it is
             // comparable with the requested PHYSICAL rect. Printed only when it
-            // is off by at least a pixel: a steady chip would otherwise write
-            // one line every repaint, and a steady chip with no line is the
-            // evidence placement landed (a chip that then shows nothing is a
-            // presentation defect, not a placement one).
+            // is off by at least a pixel: a chip whose placement drifts would
+            // otherwise write one line per repaint — at the steady-state cadence
+            // of `REPAINT_INTERVAL` that is five per second — and a steady chip
+            // with no line is the evidence placement landed (a chip that then
+            // shows nothing is a presentation defect, not a placement one).
             if self.debug.load(Ordering::Relaxed) {
                 let observed = ctx.input(|input| {
                     input
@@ -462,25 +493,54 @@ impl OverlayHost {
                     egui::ViewportCommand::ContentProtected(spec.content_protected),
                 );
             }
-            // Holds for one frame (`egui::ViewportCommand::RequestPaintWhileHidden`),
-            // so it is re-sent every pass: this is what paints a hidden window.
-            ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::RequestPaintWhileHidden);
-            if paint_state.painted.load(Ordering::Relaxed) {
-                ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Visible(true));
+            // First-frame sequencing, gated on the value that actually changed.
+            // `RequestPaintWhileHidden` holds for one frame
+            // (`egui::ViewportCommand::RequestPaintWhileHidden`), so it is re-sent
+            // while the chip is still hidden — that is what paints a hidden window.
+            // Once the chip is on screen neither command is needed again, and
+            // re-sending either would pin this viewport's `repaint_delay` to ZERO
+            // (every `Context::send_viewport_cmd_to` calls `request_repaint_of`) and
+            // deduplicate the delayed request below, defeating the throttle.
+            if !paint_state.shown.load(Ordering::Relaxed) {
+                ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::RequestPaintWhileHidden);
+                if paint_state.painted.load(Ordering::Relaxed) {
+                    ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Visible(true));
+                    paint_state.shown.store(true, Ordering::Relaxed);
+                }
             }
-            ctx.request_repaint_of(viewport);
+            // Steady-state throttle: one repaint per `REPAINT_INTERVAL` instead of
+            // one per pass. Re-issued every pass because a delayed request yields
+            // exactly ONE repaint; a pass woken by an immediate request (spawn, fade
+            // tick, DPI correction) keeps `repaint_delay` ZERO and deduplicates this
+            // request for that pass. Guarded by the window check above: a request for
+            // a window-less viewport would pin it to ZERO forever.
+            ctx.request_repaint_after_for(REPAINT_INTERVAL, viewport);
         }
 
         // The host window itself may be hidden (virshot keeps its settings window
-        // hidden between hotkeys); egui runs no pass then, so no child viewport
-        // would ever paint or even be created. So the host asks the root
-        // for a hidden paint whenever an overlay is alive.
+        // hidden between hotkeys), and egui then runs no paint pass, so no child
+        // viewport would ever paint or even be created. eframe skips the pass only
+        // when the OS REPORTS the window as hidden — minimized or occluded
+        // (`ViewportInfo::visible()`); an unknown visibility counts as visible there
+        // (`visible().unwrap_or(true)`), and a visible child keeps the root pass
+        // running anyway (`is_viewport_or_descendant_visible`), so asking for a
+        // hidden paint in those cases would only pin ROOT's `repaint_delay` to ZERO
+        // every pass and defeat the throttle.
         if has_live {
-            ctx.request_repaint();
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::RequestPaintWhileHidden,
-            );
+            if ctx.input(|input| {
+                input
+                    .raw
+                    .viewports
+                    .get(&egui::ViewportId::ROOT)
+                    .and_then(|info| info.visible())
+                    == Some(false)
+            }) {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::RequestPaintWhileHidden,
+                );
+            }
+            ctx.request_repaint_after(REPAINT_INTERVAL);
         }
 
         for id in closing {
@@ -710,6 +770,7 @@ fn observed_rect(outer: egui::Rect, ppp: f32) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn assert_send_sync<T: Send + Sync>() {}
 
@@ -1066,11 +1127,31 @@ mod tests {
         );
     }
 
+    /// Raw input in which the OS REPORTS the root window as hidden (minimized).
+    ///
+    /// `ViewportInfo::visible()` (`egui-0.37.0/src/data/input/viewport_info.rs:98`)
+    /// is the only hidden signal eframe has, and it treats an unknown visibility as
+    /// visible (`visible().unwrap_or(true)`), so a plain `RawInput::default()`
+    /// (all flags `None`) means "the host window paints anyway".
+    fn input_with_hidden_root() -> egui::RawInput {
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                minimized: Some(true),
+                ..Default::default()
+            },
+        );
+        input
+    }
+
     #[test]
     fn an_alive_overlay_asks_the_root_viewport_to_paint_while_hidden() {
         // A hidden host window (virshot keeps its settings window hidden) runs
-        // no pass, so egui would never paint or even create the child window
-        // (the host asks the root for a hidden paint for a live overlay).
+        // no paint pass, so egui would never paint or even create the child
+        // window — the host asks the root for a hidden paint for a live overlay.
+        // The request is gated on the root being KNOWN hidden: sending it every
+        // pass would pin ROOT's `repaint_delay` to ZERO and defeat the throttle.
         let mut host = OverlayHost::new();
         let handle = host.handle();
         let id = handle
@@ -1079,7 +1160,7 @@ mod tests {
         let ctx = host_context();
         host.update(&ctx);
 
-        let output = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        let output = ctx.run_ui(input_with_hidden_root(), |_ui| host.paint(&ctx));
         let root_commands = output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
@@ -1090,14 +1171,30 @@ mod tests {
 
         assert!(
             root_commands.contains(&egui::ViewportCommand::RequestPaintWhileHidden),
-            "a live overlay asks the root to paint while it is hidden"
+            "a live overlay asks a KNOWN-hidden root to paint while hidden"
         );
         assert!(!host.is_painted(id), "nothing has painted yet");
+
+        // A root whose visibility is unknown (or reported visible) gets no hidden
+        // paint request: eframe runs its pass regardless, so asking would only
+        // cost a repaint every pass.
+        let output = ctx.run_ui(egui::RawInput::default(), |_ui| host.paint(&ctx));
+        let root_commands = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("the root viewport is always reported")
+            .commands
+            .clone();
+        output.drop_without_applying_deltas();
+        assert!(
+            !root_commands.contains(&egui::ViewportCommand::RequestPaintWhileHidden),
+            "no hidden-paint request while the root is not known hidden"
+        );
 
         // With no overlay alive the host gets no extra paint requests at all.
         handle.hide(id).expect("hiding a live window succeeds");
         host.update(&ctx);
-        let output = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        let output = ctx.run_ui(input_with_hidden_root(), |_ui| {});
         let root_commands = output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
@@ -1364,6 +1461,319 @@ mod tests {
                 egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
             )),
             "no correction while the window reports no pixels-per-point"
+        );
+    }
+
+    // ---------- repaint scheduling ----------
+
+    /// The interval `REPAINT_INTERVAL` implements, pinned here (not read from the
+    /// const) so the throttle cannot drift from the value the tests were written
+    /// against.
+    const REPAINT_INTERVAL_MS: u64 = 200;
+
+    /// Every repaint request a context saw, in request order.
+    ///
+    /// Used by the `drain` tests, which run outside a paint pass: egui overwrites a
+    /// request made outside a pass at `begin_pass_repaint_logic`
+    /// (`egui-0.37.0/src/context.rs:100-126`), so
+    /// `FullOutput::viewport_output[id].repaint_delay` cannot show what `drain`
+    /// asked for. `Context::set_repaint_observer` fires for EVERY request including
+    /// deduped ones (`context.rs:160-162`), carrying
+    /// `RequestRepaintInfo { viewport_id, delay, .. }` — the only public surface
+    /// that tells an immediate request from a delayed one without a pass.
+    ///
+    /// A pass-based test asserts the EFFECTIVE schedule through `repaint_delay`
+    /// instead (`paint_steady_live_chip_schedules_delayed_repaint`).
+    ///
+    /// The observer runs while the `Context` is locked, so it must not call back
+    /// into it: this one only appends to the log behind its own mutex.
+    #[derive(Default)]
+    struct RepaintLog {
+        entries: Arc<Mutex<Vec<(egui::ViewportId, Duration)>>>,
+    }
+
+    impl RepaintLog {
+        /// Install as the context's repaint observer. Only one observer can be
+        /// set — every `set_repaint_observer` call overrides the previous one.
+        fn install(ctx: &egui::Context) -> Self {
+            let log = Self::default();
+            let observed = Arc::clone(&log.entries);
+            ctx.set_repaint_observer(move |info| {
+                if let Ok(mut entries) = observed.lock() {
+                    entries.push((info.viewport_id, info.delay));
+                }
+            });
+            log
+        }
+
+        /// Forget everything recorded so far, so a test observes only the pass
+        /// under test and not the setup passes before it.
+        fn clear(&self) {
+            if let Ok(mut entries) = self.entries.lock() {
+                entries.clear();
+            }
+        }
+
+        /// Delays requested for `viewport`, in request order.
+        fn delays_for(&self, viewport: egui::ViewportId) -> Vec<Duration> {
+            let Ok(entries) = self.entries.lock() else {
+                return Vec::new();
+            };
+            entries
+                .iter()
+                .filter(|(id, _)| *id == viewport)
+                .map(|(_, delay)| *delay)
+                .collect()
+        }
+
+        /// Whether any request asked for exactly `delay` on `viewport`.
+        fn requested(&self, viewport: egui::ViewportId, delay: Duration) -> bool {
+            self.delays_for(viewport)
+                .into_iter()
+                .any(|observed| observed == delay)
+        }
+    }
+
+    /// Raw input reporting a real chip window with the given DPI scale.
+    fn input_with_chip_window(viewport: egui::ViewportId, scale: f32) -> egui::RawInput {
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(viewport, window_with_scale(scale));
+        input
+    }
+
+    /// The chip's paint callback, as egui hands it to the backend
+    /// (`egui::DeferredViewportUiCallback`).
+    type ChipCallback = Arc<dyn Fn(&mut egui::Ui) + Send + Sync>;
+
+    /// One host-loop pass: `host.paint` runs INSIDE the pass, because egui overwrites
+    /// a repaint request made outside a pass at `begin_pass_repaint_logic`
+    /// (`context.rs:100-126`); only an in-pass request becomes the EFFECTIVE schedule
+    /// the pass reports in `FullOutput::viewport_output[id].repaint_delay`.
+    fn host_pass(
+        ctx: &egui::Context,
+        host: &mut OverlayHost,
+        input: &egui::RawInput,
+    ) -> egui::FullOutput {
+        ctx.run_ui(input.clone(), |_ui| host.paint(ctx))
+    }
+
+    /// One chip pass, exactly how eframe runs a Deferred viewport
+    /// (`eframe-0.37.0/src/native/glow_integration.rs:1781`: `run_ui` with
+    /// `RawInput::viewport_id` set to the child and its stored callback as the root
+    /// ui). That pass resets the chip's schedule: with no outstanding request,
+    /// `begin_pass_repaint_logic` puts `repaint_delay` back to `Duration::MAX`
+    /// (`context.rs:113-115`), which is what lets the NEXT host pass schedule a
+    /// throttled repaint instead of deduplicating against a leftover ZERO.
+    fn chip_pass(
+        ctx: &egui::Context,
+        viewport: egui::ViewportId,
+        input: &egui::RawInput,
+        callback: &ChipCallback,
+    ) -> egui::FullOutput {
+        let mut input = input.clone();
+        input.viewport_id = viewport;
+        let callback = Arc::clone(callback);
+        ctx.run_ui(input, move |ui| callback(ui))
+    }
+
+    /// The repaint a pass is scheduled for, per viewport.
+    fn scheduled_repaint(output: &egui::FullOutput, viewport: egui::ViewportId) -> Duration {
+        output.viewport_output[&viewport].repaint_delay
+    }
+
+    /// Drive a chip through the pass order eframe uses — host pass, chip pass, host
+    /// pass, … — up to the repaint the `Visible(true)` request bought, and return the
+    /// raw input that reports its window plus the viewport's paint callback.
+    fn drive_to_shown(
+        host: &mut OverlayHost,
+        ctx: &egui::Context,
+        viewport: egui::ViewportId,
+    ) -> (egui::RawInput, ChipCallback) {
+        // Register the deferred viewport: it exists but has no window yet.
+        let output = ctx.run_ui(egui::RawInput::default(), |_ui| host.update(ctx));
+        let callback = output.viewport_output[&viewport]
+            .viewport_ui_cb
+            .clone()
+            .expect("the deferred viewport carries its paint callback");
+        output.drop_without_applying_deltas();
+
+        let input = input_with_chip_window(viewport, 1.0);
+
+        // Host pass: the OS created the window and reported its DPI, so `paint` takes
+        // the has-window branch — content protection, hidden paint, DPI correction.
+        host_pass(ctx, host, &input).drop_without_applying_deltas();
+
+        // Chip pass: the first frame is painted while the window is still hidden.
+        chip_pass(ctx, viewport, &input, &callback).drop_without_applying_deltas();
+
+        // Host pass: the chip has pixels, so it is shown (`Visible(true)`).
+        host_pass(ctx, host, &input).drop_without_applying_deltas();
+
+        // Chip pass: the second repaint an immediate (ZERO-delay) request bought
+        // (`context.rs:141-145`); after it the chip is idle.
+        chip_pass(ctx, viewport, &input, &callback).drop_without_applying_deltas();
+
+        (input, callback)
+    }
+
+    #[test]
+    fn paint_steady_live_chip_schedules_delayed_repaint() {
+        // A chip that already has a window changes only when a command arrives, so a
+        // steady host pass must schedule the next repaint for the throttle interval
+        // instead of demanding one right now — on the chip's own viewport (a Deferred
+        // child is NOT woken by a root repaint) and on the host loop. A second cycle
+        // keeps the schedule, because a delayed request buys exactly ONE repaint
+        // (`context.rs:147-151`) and `paint` must re-issue it to stay alive.
+        let mut host = OverlayHost::new();
+        let handle = host.handle();
+        let id = handle
+            .spawn_window(spec_at(0.0, 0.0), chip("chip"), 1.0)
+            .expect("enqueueing a spawn succeeds");
+        let viewport = viewport_id(id);
+        let ctx = host_context();
+        let (input, callback) = drive_to_shown(&mut host, &ctx, viewport);
+
+        let interval = Duration::from_millis(REPAINT_INTERVAL_MS);
+        for cycle in 1..=2 {
+            chip_pass(&ctx, viewport, &input, &callback).drop_without_applying_deltas();
+            let output = host_pass(&ctx, &mut host, &input);
+            assert_eq!(
+                scheduled_repaint(&output, viewport),
+                interval,
+                "cycle {cycle}: a live chip must idle for {interval:?}, not repaint now"
+            );
+            assert_eq!(
+                scheduled_repaint(&output, egui::ViewportId::ROOT),
+                interval,
+                "cycle {cycle}: the host loop must idle for {interval:?} too"
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn paint_sends_viewport_commands_only_when_a_value_changes() {
+        // The throttle depends on the change gate: `Context::send_viewport_cmd_to`
+        // calls `request_repaint_of` (`context.rs:4569-4573`), so re-sending an
+        // unchanged command would pin the chip's `repaint_delay` to ZERO and
+        // deduplicate the delayed request of the same pass. Commands whose value has
+        // already reached the window (protection, hidden paint, show) and the
+        // placement correction for the reported scale must therefore be silent.
+        let mut host = OverlayHost::new();
+        let handle = host.handle();
+        let id = handle
+            .spawn_window(spec_at(0.0, 0.0), chip("chip"), 1.0)
+            .expect("enqueueing a spawn succeeds");
+        let viewport = viewport_id(id);
+        let ctx = host_context();
+        let (input, callback) = drive_to_shown(&mut host, &ctx, viewport);
+
+        chip_pass(&ctx, viewport, &input, &callback).drop_without_applying_deltas();
+        let output = host_pass(&ctx, &mut host, &input);
+        let commands = output.viewport_output[&viewport].commands.clone();
+        let delay = scheduled_repaint(&output, viewport);
+        output.drop_without_applying_deltas();
+
+        assert!(
+            !commands.iter().any(|cmd| matches!(
+                cmd,
+                egui::ViewportCommand::OuterPosition(_)
+                    | egui::ViewportCommand::InnerSize(_)
+                    | egui::ViewportCommand::Visible(_)
+                    | egui::ViewportCommand::ContentProtected(_)
+                    | egui::ViewportCommand::RequestPaintWhileHidden
+            )),
+            "an unchanged chip must send no viewport command, got {commands:?}"
+        );
+        assert_eq!(
+            delay,
+            Duration::from_millis(REPAINT_INTERVAL_MS),
+            "with no command the chip keeps the throttled schedule, got {delay:?}"
+        );
+
+        // A reported scale change is a value change: the correction is sent and that
+        // pass repaints immediately — placement must never wait for the interval.
+        let output = host_pass(&ctx, &mut host, &input_with_chip_window(viewport, 1.5));
+        let commands = output.viewport_output[&viewport].commands.clone();
+        let delay = scheduled_repaint(&output, viewport);
+        output.drop_without_applying_deltas();
+
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| matches!(cmd, egui::ViewportCommand::OuterPosition(_)))
+                && commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, egui::ViewportCommand::InnerSize(_))),
+            "the corrected placement is re-sent when the window reports a new scale, got {commands:?}"
+        );
+        assert_eq!(
+            delay,
+            Duration::ZERO,
+            "a placement correction repaints the chip now, got {delay:?}"
+        );
+    }
+
+    #[test]
+    fn drain_spawn_still_requests_immediate_repaint() {
+        // A spawn must be registered on the very next pass, so the host loop gets
+        // an immediate (ZERO-delay) request. The throttle keeps this invariant: a
+        // delayed request would leave the child window uncreated (and a
+        // window-less viewport must not be pinned via `request_repaint_of` — see the
+        // hazard note in the `Spawn` branch of `drain`).
+        let mut host = OverlayHost::new();
+        let handle = host.handle();
+        let ctx = host_context();
+        let log = RepaintLog::install(&ctx);
+
+        handle
+            .spawn_window(spec_at(0.0, 0.0), chip("chip"), 1.0)
+            .expect("enqueueing a spawn succeeds");
+        host.drain(&ctx);
+
+        assert!(
+            log.requested(egui::ViewportId::ROOT, Duration::ZERO),
+            "a spawn must wake the host loop immediately, got {:?}",
+            log.delays_for(egui::ViewportId::ROOT)
+        );
+    }
+
+    #[test]
+    fn drain_redraw_requests_immediate_repaint_for_the_chip_viewport() {
+        // A Deferred viewport repaints independently of its parent, so a root
+        // `request_repaint()` never wakes the chip: new content would sit
+        // unpainted until the chip's own next pass. A Redraw of a chip that HAS a
+        // window must therefore wake that viewport immediately — this is what keeps
+        // a fade tick animating at 25 ms despite the steady-state throttle.
+        let mut host = OverlayHost::new();
+        let handle = host.handle();
+        let id = handle
+            .spawn_window(spec_at(0.0, 0.0), chip("chip"), 1.0)
+            .expect("enqueueing a spawn succeeds");
+        let viewport = viewport_id(id);
+        let ctx = host_context();
+        let log = RepaintLog::install(&ctx);
+
+        host.update(&ctx);
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(viewport, window_with_scale(1.0));
+        ctx.run_ui(input, |_ui| {}).drop_without_applying_deltas();
+
+        handle
+            .redraw(id, chip("updated"), 1.0)
+            .expect("the window is live");
+        log.clear();
+        host.drain(&ctx);
+
+        assert!(
+            log.requested(viewport, Duration::ZERO),
+            "a Redraw must wake the chip's own viewport, got {:?}",
+            log.delays_for(viewport)
+        );
+        assert!(
+            log.requested(egui::ViewportId::ROOT, Duration::ZERO),
+            "the host loop must wake too, so the viewport stays registered, got {:?}",
+            log.delays_for(egui::ViewportId::ROOT)
         );
     }
 }

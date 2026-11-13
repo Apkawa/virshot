@@ -103,6 +103,58 @@ use crate::update::notes;
 /// §5 budget.
 const TRAY_POLL_TICK: Duration = Duration::from_millis(500);
 
+/// Repaint cadence for the app's static-content CHILD viewports — About and
+/// the update dialog (task 2026-11-13_gpu-repaint-throttle, Stage 3). Their
+/// content changes only when this logic pass re-registers them with a new
+/// snapshot, so the previous per-pass `request_repaint_of` repainted both
+/// windows on every pass. 200 ms mirrors the overlay chip throttle
+/// (`crates/overlay/src/host.rs::REPAINT_INTERVAL`) and stays far under
+/// `TRAY_POLL_TICK`, so a hidden settings window keeps ticking at the tray
+/// cadence while these children paint on their own, much slower, schedule.
+///
+/// egui keeps exactly ONE repaint per non-zero delay (`context.rs:133-172`),
+/// so the request is re-issued from the registration block on every pass that
+/// owns the viewport.
+const CHILD_VIEWPORT_REPAINT_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Whether egui currently knows a window for `viewport`.
+fn child_viewport_has_window(ctx: &egui::Context, viewport: egui::ViewportId) -> bool {
+    ctx.input(|i| i.raw.viewports.contains_key(&viewport))
+}
+
+/// Schedule the throttled repaint for a Deferred child viewport — only while
+/// it has a window. A request for a window-less viewport is not harmless:
+/// egui records it as a `Duration::ZERO` pin (`outstanding = 1`) that eframe
+/// then drops (`run.rs` has no window to wake), and that pin deduplicates
+/// every later throttled request, since a delayed request lands only when it
+/// is strictly shorter than the current delay (`context.rs:133-172`). With no
+/// window the schedule stays `Duration::MAX` and the first paint arrives when
+/// the OS creates the window.
+fn schedule_child_viewport_repaint(ctx: &egui::Context, viewport: egui::ViewportId) {
+    if child_viewport_has_window(ctx, viewport) {
+        ctx.request_repaint_after_for(CHILD_VIEWPORT_REPAINT_INTERVAL, viewport);
+    }
+}
+
+/// Repaint a child viewport IMMEDIATELY: an event landed in this pass (release
+/// notes arriving while the dialog is open) and must show at once, not up to
+/// `CHILD_VIEWPORT_REPAINT_INTERVAL` later. Window-guarded for the same reason
+/// as `schedule_child_viewport_repaint`; the pass after it goes back to the
+/// throttled schedule because a child paint pass resets the schedule to
+/// `Duration::MAX` (`context.rs:102-127`).
+fn repaint_child_viewport_now(ctx: &egui::Context, viewport: egui::ViewportId) {
+    if child_viewport_has_window(ctx, viewport) {
+        ctx.request_repaint_of(viewport);
+    }
+}
+
+/// Viewport id of the update dialog. `ViewportId::from_hash_of` is not
+/// `const fn`, so the name lives in one place: the notes drain needs the id
+/// BEFORE the registration block that defines the local.
+fn update_dialog_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("virshot-update")
+}
+
 /// Tab identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
@@ -568,7 +620,11 @@ impl eframe::App for SettingsApp {
                         );
                     },
                 );
-                ctx.request_repaint_of(about_viewport);
+                // Throttled steady cadence for static content; re-issued every
+                // pass this block owns the viewport. The window guard keeps a
+                // viewport that has not been created yet unpinned — see
+                // `schedule_child_viewport_repaint`.
+                schedule_child_viewport_repaint(ctx, about_viewport);
             }
         }
 
@@ -785,6 +841,12 @@ impl eframe::App for SettingsApp {
                 Ok(notes) => Ok(Arc::new(notes)),
                 Err(err) => Err(err),
             });
+            // The notes are new content the dialog cannot see until its next
+            // paint, and that paint is now throttled: ask for an immediate
+            // repaint of the dialog viewport on THIS pass (the registration
+            // block below re-issues the throttled schedule afterwards, which
+            // egui deduplicates behind this immediate request).
+            repaint_child_viewport_now(ctx, update_dialog_viewport_id());
         }
 
         // Update dialog: the exact About child-viewport lifecycle — an OS
@@ -797,7 +859,7 @@ impl eframe::App for SettingsApp {
             self.dismiss_update_dialog();
         }
         if self.update_dialog.wants_registration() {
-            let update_viewport = egui::ViewportId::from_hash_of("virshot-update");
+            let update_viewport = update_dialog_viewport_id();
             if let Some(close_flag) = self.update_dialog.close_flag() {
                 // Owned snapshots for the `'static` callback: two O(1) Arc
                 // bumps (cache, outcome slot), one Option clone of notes
@@ -839,9 +901,12 @@ impl eframe::App for SettingsApp {
                         );
                     },
                 );
-                // A hidden settings window still repaints this viewport on
-                // its own schedule; nudge it so notes arrival lands promptly.
-                ctx.request_repaint_of(update_viewport);
+                // Throttled steady cadence for static content, re-issued while
+                // this block owns the viewport. Content changes (progress,
+                // install status) land on the next child paint, at most one
+                // interval later; release notes get an immediate one-shot nudge
+                // where they are drained above.
+                schedule_child_viewport_repaint(ctx, update_viewport);
             }
             // Presses recorded by the CHILD pass of the previous frame (the
             // child pass runs BEFORE the root pass — same one-frame ordering

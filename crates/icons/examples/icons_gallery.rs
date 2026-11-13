@@ -34,7 +34,17 @@ const ICON_SIZE: f32 = 64.0;
 /// Number of frames before the window closes itself (headless runs exit).
 const MAX_FRAMES: usize = 10;
 
-/// Repaint tick, so frames advance even with no input events.
+/// Repaint tick, so frames advance even with no input events. The interval
+/// lives here and nowhere else in this example (task
+/// 2026-11-13_gpu-repaint-throttle, Stage 4). Kept at 100 ms rather than
+/// aligned to the shipped 200 ms throttle
+/// (`crates/overlay/src/host.rs::REPAINT_INTERVAL`): the gallery repaints the
+/// same static rows every frame, and the only thing a frame advances is the
+/// counter that closes the window after [`MAX_FRAMES`] — the run is bounded by
+/// frames, not by wall clock, so a slower tick paints the same number of
+/// frames and only stretches the run from ~1 s to ~2 s. 100 ms is also
+/// eframe's invisible-window floor (`run.rs:27`, applied `run.rs:376-382`), so
+/// a shorter tick would be silently raised for a hidden window.
 const REPAINT_EVERY: Duration = Duration::from_millis(100);
 
 /// Asset name paired with its embedded PNG bytes.
@@ -137,4 +147,29 @@ fn main() -> eframe::Result {
         options,
         Box::new(|_cc| Ok(Box::new(IconsGallery::default()))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Upper bound for the headless gallery run: it closes itself after
+    /// [`MAX_FRAMES`] ticks, so the tick may not stretch the demo past a few
+    /// seconds on a host with no live display.
+    const DEMO_LIFETIME: Duration = Duration::from_secs(5);
+
+    /// The interval comes from the named const, and the literal exists only
+    /// there: 100 ms, at eframe's invisible-window floor (`run.rs:27`) and so
+    /// never silently raised.
+    #[test]
+    fn repaint_every_named_tick_pins_100ms() {
+        assert_eq!(REPAINT_EVERY, Duration::from_millis(100));
+    }
+
+    /// Self-termination still lands inside the intended demo lifetime, so the
+    /// frame budget stays visible and headless runs exit rather than park.
+    #[test]
+    fn max_frames_times_repaint_every_closes_inside_demo_lifetime() {
+        assert!(REPAINT_EVERY * MAX_FRAMES as u32 <= DEMO_LIFETIME);
+    }
 }

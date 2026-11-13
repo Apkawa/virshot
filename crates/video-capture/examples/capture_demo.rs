@@ -44,6 +44,7 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use egui::{CentralPanel, DragValue, Slider, Ui, ViewportBuilder};
 use video_capture::Recorder;
@@ -86,6 +87,21 @@ const NATIVE_HINT: (u32, u32) = (1920, 1080);
 /// `Recorder::with_debug_dump` (the engine creates it; a failure there is a
 /// warning, never a capture failure).
 const DEBUG_DUMP_DIR: &str = ".tmp/dumps";
+
+/// Repaint cadence for the demo loop (task 2026-11-13_gpu-repaint-throttle,
+/// Stage 4). Nothing here animates — no spinner, no progress bar — so a
+/// per-frame repaint only bought GPU work for a status line that changes at
+/// ack speed. 200 ms mirrors the shipped throttle
+/// (`crates/overlay/src/host.rs::REPAINT_INTERVAL`,
+/// `src/gui/app.rs::CHILD_VIEWPORT_REPAINT_INTERVAL`) and stays above eframe's
+/// invisible-window floor of 100 ms (`run.rs:27`, applied `run.rs:376-382`),
+/// so the interval is not silently raised for a hidden window.
+///
+/// egui keeps the EARLIEST scheduled repaint (strict `delay < repaint_delay`)
+/// and a non-zero delay buys exactly ONE repaint, so `App::ui` re-issues this
+/// request every pass; an input event still repaints immediately because
+/// `Duration::ZERO` wins the `<`.
+const REPAINT_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Russian hint for the FPS control: the configured rate is a hint to Media
 /// Foundation (`MinimumUpdateIntervalSettings::Custom`), and the engine paces
@@ -1052,8 +1068,15 @@ impl eframe::App for CaptureDemo {
         // The capture thread reads queued commands and emits acks only when a
         // frame arrives, so the UI must keep repainting: on a static desktop
         // egui's default update mode delivers few frames, and an ack would never
-        // be polled.
-        ui.ctx().request_repaint();
+        // be polled. The request is delayed (`REPAINT_INTERVAL`) instead of
+        // immediate: the ack polls above run inside this same pass, so an ack
+        // that arrives between passes is drawn at most one interval later
+        // (≤ 200 ms) rather than the moment it arrives — nothing is lost, only
+        // drawn later. A delayed request buys exactly one repaint, so it is
+        // re-issued every pass to keep the loop alive; a button press or slider
+        // drag repaints immediately, because that immediate request beats the
+        // pending 200 ms in egui's strict `<`.
+        ui.ctx().request_repaint_after(REPAINT_INTERVAL);
     }
 }
 
@@ -1118,4 +1141,29 @@ fn main() -> eframe::Result {
         options,
         Box::new(|_cc| Ok(Box::new(CaptureDemo::default()))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// eframe's invisible/minimized-window floor (`run.rs:27`, applied
+    /// `run.rs:376-382`): a shorter interval would be silently raised for a
+    /// hidden window, so a throttle below it buys nothing.
+    const INVISIBLE_WINDOW_FLOOR: Duration = Duration::from_millis(100);
+
+    /// The repaint cadence comes from the named const, and the literal exists
+    /// only there: 200 ms, matching the shipped throttle.
+    #[test]
+    fn repaint_interval_throttled_pass_pins_repo_200ms() {
+        assert_eq!(REPAINT_INTERVAL, Duration::from_millis(200));
+    }
+
+    /// The demo keeps repainting while the window is hidden (ack polling needs
+    /// passes), so the interval must sit at or above eframe's floor to be
+    /// effective rather than silently raised.
+    #[test]
+    fn repaint_interval_hidden_window_stays_above_eframe_floor() {
+        assert!(REPAINT_INTERVAL >= INVISIBLE_WINDOW_FLOOR);
+    }
 }

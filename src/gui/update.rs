@@ -385,8 +385,10 @@ impl UpdateDialogWindow {
 
     /// Open with a FRESH close flag; returns whether this call newly opened
     /// (a re-open of an already-open viewport must not inherit state — same
-    /// rule as `about::AboutWindow::open`).
-    fn open(&mut self) -> bool {
+    /// rule as `about::AboutWindow::open`, which is `pub(crate)` for the same
+    /// reason: the repaint-schedule tests open the dialog without spawning the
+    /// notes fetch thread `open_update_dialog` wires).
+    pub(crate) fn open(&mut self) -> bool {
         if self.open {
             return false;
         }
