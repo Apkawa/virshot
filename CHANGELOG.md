@@ -1,8 +1,14 @@
+## [0.1.7] - 2026-11-13
+
+### ⚙️ Miscellaneous Tasks
+
+- Try fix release wf  v5
 ## [0.1.6] - 2026-11-13
 
 ### ⚙️ Miscellaneous Tasks
 
 - Try fix release wf typo v4
+- *(release)* V0.1.6
 ## [0.1.5] - 2026-11-13
 
 ### ⚙️ Miscellaneous Tasks
