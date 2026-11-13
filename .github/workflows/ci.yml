@@ -13,6 +13,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,3 +49,17 @@ jobs:
         run: cargo test --workspace -- --skip 'cli_headless::'
       - name: Clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  release:
+    name: Release trigger
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh workflow run release.yaml \
+            --ref ${{ github.ref_name }} \
+            --field tag=${{ github.ref_name }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

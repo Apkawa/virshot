@@ -2,8 +2,14 @@ name: Release
 
 on:
   workflow_run:
-      workflows: ['CI']
-      types: [completed]
+    workflows: ['CI']
+    types: [completed]
+    branches: [master]   # Оставляем для запусков по master
+  workflow_dispatch:      # Добавляем для запусков по тегам
+    inputs:
+      tag:
+        description: 'Тег для релиза (например, v0.1.0)'
+        required: true
 
 concurrency:
   group: "release-${{ github.ref }}"
@@ -18,14 +24,15 @@ env:
   # The runner only exposes GITHUB_TOKEN as a secret; `gh` needs it in the
   # environment to publish releases with this workflow's `contents: write`.
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
     if: >-
-      ${{ github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.event == 'push' &&
-          (github.event.workflow_run.head_branch == 'master' ||
-           startsWith(github.event.workflow_run.head_branch, 'v')) }}
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_branch == 'master') }}
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -42,6 +49,8 @@ jobs:
             key: linux-x64
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: $RELEASE_TAG
       - name: Install native dev packages (Linux only)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -63,16 +72,17 @@ jobs:
 
   package:
     if: >-
-      ${{ github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.event == 'push' &&
-          (github.event.workflow_run.head_branch == 'master' ||
-           startsWith(github.event.workflow_run.head_branch, 'v')) }}
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_branch == 'master') }}
     name: Package and publish
     runs-on: ubuntu-latest
     needs: build
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: $RELEASE_TAG
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
@@ -85,7 +95,7 @@ jobs:
       - name: Resolve build kind and tag
         id: kind
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
+          if [ "${{ env.RELEASE_TAG }}" = "tag" ]; then
             echo "kind=release" >> "$GITHUB_OUTPUT"
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
