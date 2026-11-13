@@ -95,7 +95,7 @@ jobs:
       - name: Resolve build kind and tag
         id: kind
         run: |
-          if [ "${{ env.RELEASE_TAG }}" = "tag" ]; then
+          if [ "${{ env.RELEASE_TAG }}" = v* ]; then
             echo "kind=release" >> "$GITHUB_OUTPUT"
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
