@@ -1,3 +1,9 @@
+## [0.1.1] - 2026-11-13
+
+### ⚙️ Miscellaneous Tasks
+
+- Change release message
+- Fix ci wf tags
 ## [0.1.0] - 2026-11-13
 
 ### 🚀 Features
@@ -69,3 +75,4 @@
 - Release wf after success CI
 - Fix wf release conditions
 - Fix scripts/release.sh
+- *(release)* V0.1.0
