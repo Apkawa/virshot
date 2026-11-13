@@ -1,4 +1,4 @@
-## [unreleased]
+## [0.1.0] - 2026-11-13
 
 ### 🚀 Features
 
@@ -13,13 +13,22 @@
 - *(gui)* Settings window layout, wider key set, Windows bind probe
 - *(i18n)* Localize the UI in six languages
 - *(video-capture)* Isolated screen recording crate over windows-capture
-- *(release)* Add cliff.toml with ZeroVer bump config
-- *(release)* Add scripts/release.sh (changelog + ZeroVer bump/tag)
+- *(release)* Add git-cliff release helper with zerover bump/tag
+- *(ci)* Add github actions test and release pipelines
+- *(about)* Add About dialog with build metadata and embedded changelog
+- *(update)* Add automatic updates with release checks, installer, and self-replace
+- *(autostart)* Windows autostart checkbox with HKCU Run sync
+- *(icon)* Redraw icon and inject ico to exe
 
 ### 🐛 Bug Fixes
 
 - Windows_subsustem define
 - Game window screenshot, xcap[wgc]
+- *(ci)* Make workspace tests pass on github runners
+- *(ci)* Pass gh release target commit via --target
+- *(update)* Suppress the date trigger when the release commit sha matches the build
+- *(autostart)* Create the HKCU Run key when absent
+- *(tray)* Reorder tray menu
 
 ### 📚 Documentation
 
@@ -27,6 +36,19 @@
 - Move githooks note into the formatting & pre-commit section
 - Document one-time git hooks setup in CONTRIBUTING
 - Single source of truth for the gate — hooks reuse check.sh, docs stop duplicating the chain
+- Update readme, add en, zh translations
+
+### ⚡ Performance
+
+- *(gui)* Repaint overlays and dialogs on a fixed interval
+
+### 🚜 Refactor
+
+- *(gui)* Split gui.rs into functional modules and move update modules into src/update/
+
+### 🧪 Testing
+
+- *(update)* Fix assert update info against the current platform's manifest entry
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -41,5 +63,9 @@
 - Up backlog
 - Update test rules AGENTS.md
 - *(dumbspec)* Archive settings-window-fixes task artifacts
-- *(dumbspec)* Add git-cliff release task (draft, research, spec v1, plan)
-- *(dev)* Pin git-cliff 2.14.2 dev tool (install + AGENTS.md note)
+- Export github token for gh in release workflow
+- Windows skip e2e
+- Windows skip e2e v2 (oops)
+- Release wf after success CI
+- Fix wf release conditions
+- Fix scripts/release.sh
