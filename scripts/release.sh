@@ -84,7 +84,7 @@ case "$1" in
     # VER is future by construction (equal-to-last was rejected), so the tag is new.
     "$CLIFF" --config "$CFG" --tag "$VER" -o "$ROOT/CHANGELOG.md"
     git add Cargo.toml CHANGELOG.md
-    git commit -m "chore(release): prepare for $VER"  # plain commit: hooks must run
+    git commit -m "chore(release): $VER"  # plain commit: hooks must run
     git tag -a "$VER" -m "Release $VER"
     echo "released $VER: Cargo.toml version $bare, CHANGELOG.md updated, tag $VER created"
     ;;
