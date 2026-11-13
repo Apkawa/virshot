@@ -78,7 +78,7 @@ pub(crate) fn run_value_payload(exe_path: &str) -> String {
 pub(crate) enum Error {
     #[error("failed to resolve the executable path for the autostart entry: {0}")]
     CurrentExe(std::io::Error),
-    #[error("failed to open the autostart registry key: {0}")]
+    #[error("failed to create or open the autostart registry key: {0}")]
     RegistryOpen(std::io::Error),
     #[error("failed to read the autostart registry value: {0}")]
     RegistryRead(std::io::Error),
@@ -90,8 +90,10 @@ pub(crate) enum Error {
 
 /// Sync the HKCU Run entry with the requested `enabled` state.
 ///
-/// Windows: resolves `current_exe()`, builds [`run_value_payload`], opens the
-/// Run subkey with `KEY_ALL_ACCESS`, reads the stored value (absent —
+/// Windows: resolves `current_exe()`, builds [`run_value_payload`], creates
+/// or opens the Run subkey with `KEY_ALL_ACCESS` (`RegCreateKeyEx` semantics:
+/// a clean Windows profile may have no HKCU `Run` key at all, and enabling
+/// autostart must create it), reads the stored value (absent —
 /// `ErrorKind::NotFound` — is `None`), applies [`decide_action`), and only
 /// then writes (`set_value`), deletes (`delete_value`; an already-absent
 /// value counts as `Unchanged`), or skips. Under `cfg(test)` the value name
@@ -99,9 +101,9 @@ pub(crate) enum Error {
 /// neither `Sync` nor `Clone`, so one fresh handle is opened per call.
 /// Off Windows: no-op `Ok(())`.
 ///
-/// Failure modes: executable path resolution, key open, value read, value
-/// write, and value delete failures return the typed [`Error`] variants —
-/// never a panic.
+/// Failure modes: executable path resolution, key create-or-open, value
+/// read, value write, and value delete failures return the typed [`Error`]
+/// variants — never a panic.
 #[cfg(any(test, windows))]
 pub(crate) fn sync(enabled: bool) -> Result<(), Error> {
     #[cfg(windows)]
@@ -118,8 +120,8 @@ pub(crate) fn sync(enabled: bool) -> Result<(), Error> {
 
         let exe = std::env::current_exe().map_err(Error::CurrentExe)?;
         let payload = run_value_payload(&exe.to_string_lossy());
-        let key = HKCU
-            .open_subkey_with_flags(RUN_KEY_PATH, KEY_ALL_ACCESS)
+        let (key, _disposition) = HKCU
+            .create_subkey_with_flags(RUN_KEY_PATH, KEY_ALL_ACCESS)
             .map_err(Error::RegistryOpen)?;
         let current = match key.get_value::<String, _>(value_name) {
             Ok(value) => Some(value),

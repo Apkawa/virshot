@@ -143,9 +143,12 @@ fn sync_registers_and_unregisters_scratch_value() {
         }
     }
 
-    let run = HKCU
-        .open_subkey_with_flags(RUN_KEY_PATH, KEY_ALL_ACCESS)
-        .expect("HKCU Run key must be openable");
+    // Create-or-open, mirroring `sync`: a clean profile (and GitHub Actions
+    // Windows runners) may have no HKCU `Run` subkey at all, so the test must
+    // not assume it exists.
+    let (run, _disposition) = HKCU
+        .create_subkey_with_flags(RUN_KEY_PATH, KEY_ALL_ACCESS)
+        .expect("HKCU Run key must be create-or-openable");
     let _guard = ScratchGuard;
 
     let exe = std::env::current_exe().expect("current_exe must be available");
