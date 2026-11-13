@@ -1,8 +1,14 @@
+## [0.1.11] - 2026-11-13
+
+### ⚙️ Miscellaneous Tasks
+
+- Merge release to one ci file
 ## [0.1.10] - 2026-11-13
 
 ### ⚙️ Miscellaneous Tasks
 
 - Try fix release wf  v8
+- *(release)* V0.1.10
 ## [0.1.9] - 2026-11-13
 
 ### ⚙️ Miscellaneous Tasks

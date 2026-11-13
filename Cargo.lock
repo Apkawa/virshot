@@ -4810,7 +4810,7 @@ dependencies = [
 
 [[package]]
 name = "virshot"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "chrono",
  "clap",
