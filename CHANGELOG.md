@@ -1,8 +1,18 @@
+## [0.1.12] - 2026-11-16
+
+### 🚀 Features
+
+- *(gui)* Open the settings window only on first launch, tray-first otherwise
+
+### ⚙️ Miscellaneous Tasks
+
+- Speed up workflow with git-cliff binary and rust-cache
 ## [0.1.11] - 2026-11-13
 
 ### ⚙️ Miscellaneous Tasks
 
 - Merge release to one ci file
+- *(release)* V0.1.11
 ## [0.1.10] - 2026-11-13
 
 ### ⚙️ Miscellaneous Tasks
