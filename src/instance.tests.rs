@@ -49,6 +49,27 @@ fn lock_path_for_portable_config_stays_sibling_of_config() {
 }
 
 #[test]
+fn tasklist_args_any_pid_builds_tasklist_filter_pair() {
+    // The windows probe passes exactly the tasklist filter pair "/FI" +
+    // "PID eq <pid>"; the argument shape is pure, so it is asserted here.
+    assert_eq!(
+        tasklist_args(4242),
+        vec!["/FI".to_owned(), "PID eq 4242".to_owned()]
+    );
+    assert_eq!(
+        tasklist_args(1),
+        vec!["/FI".to_owned(), "PID eq 1".to_owned()]
+    );
+}
+
+#[test]
+fn create_no_window_flag_constant_matches_win32_create_no_window() {
+    // Win32 CREATE_NO_WINDOW (0x08000000): the child console process gets no
+    // console window, which is what stops the flash on a duplicate launch.
+    assert_eq!(create_no_window_flag(), 0x0800_0000);
+}
+
+#[test]
 fn pid_alive_live_probe_reports_alive() {
     assert!(pid_alive(4242, |_| true));
 }

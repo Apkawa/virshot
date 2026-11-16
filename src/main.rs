@@ -326,7 +326,7 @@ fn run_shot(
     out: Option<PathBuf>,
     format: Option<CliFormat>,
 ) -> ExitCode {
-    let settings = config::load_or_create(config_path);
+    let (settings, _) = config::load_or_create(config_path);
     let Settings {
         mut general,
         controls,
@@ -426,7 +426,15 @@ fn apply_out_override(general: &mut General, out: &Path) -> bool {
 /// tray `Exit` ends the park loop (exit 0). A successful update install closes
 /// the window and the tail restarts the new binary (Stage 7, spec §5).
 fn run_resident(config_path: &Path) -> ExitCode {
-    let settings = config::load_or_create(config_path);
+    let (settings, first_run) = config::load_or_create(config_path);
+    // Startup-only signal (spec §7): the default config file was created by
+    // this run. It is surfaced as an INFO line alongside the creation log and
+    // handed to `gui::run` below as `open_settings_on_start`, which reveals the
+    // settings CHILD window after its first paint instead of staying hidden to
+    // the tray (spec v3 §4.5).
+    if first_run {
+        tracing::info!("config: first run, default config created");
+    }
     // Locale for the resident UI (spec §2): set right after the config load
     // and BEFORE the tray, hotkey status logs, and the GUI, so every label
     // built later resolves in the configured language (`language` is already
@@ -540,7 +548,11 @@ fn run_resident(config_path: &Path) -> ExitCode {
     let restart_requested = Arc::new(AtomicBool::new(false));
     arm_startup_check(&settings, &update_tx);
 
-    tracing::info!("Settings window opening");
+    if first_run {
+        tracing::info!("Settings window opening (first run)");
+    } else {
+        tracing::info!("Settings window hidden to tray (config exists)");
+    }
     if let Err(err) = gui::run(
         config_path.to_owned(),
         settings.clone(),
@@ -553,6 +565,7 @@ fn run_resident(config_path: &Path) -> ExitCode {
         update_tx,
         update_rx,
         Arc::clone(&restart_requested),
+        first_run,
     ) {
         tracing::error!("GUI failed: {err}");
         tracing::info!("virshot idle: running without GUI");

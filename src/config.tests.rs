@@ -589,9 +589,10 @@ fn load_or_create_missing_file_creates_file_with_defaults() {
     let dir = TempDir::new("auto-create");
     let path = dir.config_path("config.toml");
 
-    let settings = load_or_create(&path);
+    let (settings, created) = load_or_create(&path);
 
     assert_eq!(settings, Settings::default());
+    assert!(created, "a missing config must report first-run creation");
     assert!(path.exists(), "first run must create the config file");
     let on_disk = load(&path).expect("created config must load back");
     assert_eq!(on_disk, Settings::default());
@@ -604,9 +605,13 @@ fn load_or_create_corrupt_file_returns_defaults_without_rewrite() {
     let broken = "[general]\nsave_path = \n";
     std::fs::write(&path, broken).expect("fixture must be writable");
 
-    let settings = load_or_create(&path);
+    let (settings, created) = load_or_create(&path);
 
     assert_eq!(settings, Settings::default());
+    assert!(
+        !created,
+        "a corrupt config must not report first-run creation"
+    );
     let on_disk = std::fs::read_to_string(&path).expect("broken config must stay readable");
     assert_eq!(
         on_disk, broken,
@@ -620,9 +625,13 @@ fn load_or_create_valid_file_returns_parsed_no_rewrite() {
     let path = dir.config_path("config.toml");
     std::fs::write(&path, SPEC_TOML).expect("fixture must be writable");
 
-    let settings = load_or_create(&path);
+    let (settings, created) = load_or_create(&path);
 
     assert_eq!(settings, load(&path).expect("spec §7 config must load"));
+    assert!(
+        !created,
+        "an existing config must not report first-run creation"
+    );
     let on_disk = std::fs::read_to_string(&path).expect("config must stay readable");
     assert_eq!(
         on_disk, SPEC_TOML,
@@ -635,9 +644,13 @@ fn load_or_create_parent_dir_created() {
     let dir = TempDir::new("auto-create-nested");
     let path = dir.config_path("virshot/config.toml");
 
-    let settings = load_or_create(&path);
+    let (settings, created) = load_or_create(&path);
 
     assert_eq!(settings, Settings::default());
+    assert!(
+        created,
+        "a nested missing config must report first-run creation"
+    );
     assert!(
         path.exists(),
         "missing parent dirs must be created before save"

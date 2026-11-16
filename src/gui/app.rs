@@ -6,8 +6,9 @@
 //! schedule and re-registers hotkeys live; the eframe `App` pass runs the
 //! pump — `logic` drains tray actions and the pad-capture / probe / check /
 //! install / notes mailboxes, drives the overlay host, decides close-vs-exit
-//! and schedules repaints, while `ui` docks the bottom bar and dispatches
-//! the tabs. Tab painting itself lives in the sibling modules.
+//! and schedules repaints. The settings UI itself paints in the CHILD viewport
+//! (`SettingsUi::paint`), so the root `ui` pass draws nothing (spec v3 §4.5).
+//! Tab painting itself lives in the sibling modules.
 //!
 //! eframe 0.37 API facts verified in the locked source, not from memory:
 //! - `App` trait: `logic(&mut self, ctx, frame)` + `ui(&mut self, ui, frame)`
@@ -22,12 +23,39 @@
 //!   the winit loop, so `request_repaint_after(TRAY_POLL_TICK)` keeps the
 //!   polling alive while the window is hidden (logic-only pass, negligible
 //!   CPU). While hidden, eframe runs `logic` only, no UI pass.
+//! - A startup with `ViewportBuilder::with_visible(false)` is NOT hidden for
+//!   good: `epi_integration::post_rendering` reveals the ROOT window after its
+//!   first painted frame (`epi_integration.rs:443-448`), and on Windows that
+//!   paint is synchronous at `Event::Resumed`. Under spec v3 the ROOT is never
+//!   shown, so `startup_hidden` is never cleared: `logic` re-sends
+//!   `ViewportCommand::Visible(false)` on every pass for the whole lifetime
+//!   as a safety net (see [`SettingsApp::startup_hidden`]). What the first-run
+//!   reveal and a tray show drive is the visibility of the settings CHILD
+//!   viewport, never of the ROOT.
 //! - Exit is the tray menu or the bottom OK/Cancel buttons (eframe 0.37 has
 //!   NO `App::should_exit` — verified in the locked source): tray `Exit` sets
 //!   `exit_requested`, OK/Cancel set `close_for_exit` and send
 //!   `ViewportCommand::Close`; the pass that sees `close_requested()` decides
 //!   through `close_decision` — an exit does NOT cancel, eframe shuts down,
 //!   `run_native` returns, the process exits 0. X-close still hides only.
+//! - Settings window = CHILD viewport (task 2026-11-15_settings-first-start-only,
+//!   spec v3 §4.5): the ROOT window is never shown — it exists only to own the
+//!   GL context and drive the loop — and the settings UI is painted by the
+//!   Deferred child viewport `"virshot-settings"`, registered on EVERY logic
+//!   pass (egui GCs a child it did not see this pass, `context.rs`, the
+//!   `OverlayHost` chip precedent at `crates/overlay/src/host.rs:314-323`). So
+//!   hiding is `ViewportCommand::Visible(false)` on a viewport that STAYS
+//!   registered: hidden ≠ destroyed, and the next tray show re-shows the very
+//!   same window. The child callback paints through a shared `SettingsUi`
+//!   snapshot behind a mutex (`'static` callback), and `logic` adopts the draft
+//!   edits, capture toggles and recorded button presses it left there — the
+//!   same one-frame-later ordering as About's close flag and the update
+//!   dialog's press slot. Because the root's first paint is what creates a
+//!   Deferred child window (`glow_integration.rs::handle_viewport_output` runs
+//!   only in the FULL pass), a hidden root is asked for a hidden paint
+//!   (`ViewportCommand::RequestPaintWhileHidden`) until the child exists, and
+//!   the child is revealed only when it is meant to be seen: painting a hidden
+//!   child would let eframe's single `is_first_frame` reveal show it.
 //!
 //! Toast plumbing (spec §4.3, Stage 4): this window OWNS the toast stack —
 //! `overlay::OverlayHost` (crates/overlay host-loop backend) and
@@ -78,6 +106,7 @@ use std::time::Instant;
 // backend paths here are spelled `crate::update::...` and the GUI update items
 // are spelled `update::...`.
 use ::overlay::OverlayHost;
+use toast::Toast;
 use toast::ToastService;
 
 use super::binding;
@@ -85,6 +114,8 @@ use super::chrome;
 use super::general;
 use super::icons;
 use super::update;
+use super::window::INITIAL_WINDOW_HEIGHT;
+use super::window::INITIAL_WINDOW_WIDTH;
 use crate::bindings::Action;
 use crate::capture;
 use crate::capture::ToastHandoff;
@@ -155,6 +186,36 @@ fn update_dialog_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("virshot-update")
 }
 
+/// Viewport id of the settings CHILD window (task 2026-11-15_settings-first-start-only,
+/// spec v3 §4.5). One place for the name: the visibility machine and the
+/// registration block both need it, and the harness pins the same string
+/// (`app.tests.rs::settings_child_id`).
+fn settings_child_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("virshot-settings")
+}
+
+/// Builder of the settings CHILD window: the same OS chrome the About/update
+/// children use (`about::window_chrome()` — decorations, resize border, close
+/// button; no minimize/maximize) and the spec §4.4 size. `with_visible(false)`
+/// is CONSTANT: egui ships the builder in `ViewportOutput` and acts on it only
+/// when it CHANGES, so visibility is driven by `ViewportCommand::Visible`,
+/// never by rebuilding the builder per pass. No `with_icon`/`with_transparent`
+/// — the child inherits the root's window icon handling and the single
+/// transparent GL clear (see [`SettingsApp::clear_color`]), and the paint fills
+/// an opaque `Frame::central_panel` for that reason.
+fn settings_child_builder() -> egui::ViewportBuilder {
+    let chrome = crate::about::window_chrome();
+    egui::ViewportBuilder::default()
+        .with_title(rust_i18n::t!("bottom.window_title"))
+        .with_inner_size([INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT])
+        .with_decorations(chrome.decorations)
+        .with_resizable(chrome.resizable)
+        .with_close_button(chrome.close_button)
+        .with_minimize_button(chrome.minimize_button)
+        .with_maximize_button(chrome.maximize_button)
+        .with_visible(false)
+}
+
 /// Tab identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
@@ -170,6 +231,241 @@ impl Tab {
             Tab::Hotkeys => rust_i18n::t!("general.tab_hotkeys").into_owned(),
             Tab::Overlay => rust_i18n::t!("general.tab_overlay").into_owned(),
         }
+    }
+}
+
+/// A press the settings CHILD paint pass recorded instead of acting on it:
+/// every effect needs app state the `'static` callback cannot reach (the
+/// hotkey controller, the config file, the toast hand-off, the ROOT viewport),
+/// so the paint records and `logic` performs it one frame later — the exact
+/// shape of the update dialog's `dialog_outcome_slot` (`gui/update.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsAction {
+    /// «Применить» (§4.4): save + re-register + publish, window stays open.
+    Apply,
+    /// «OK» (§4.4): the same apply, then a real exit of the PROCESS (the ROOT
+    /// viewport closes — the child window alone never shuts the loop down).
+    Ok,
+    /// «Cancel» (§4.4): discard the draft, end any capture, exit like OK.
+    Cancel,
+    /// General-tab Browse (spec §4.4): the blocking folder picker runs in
+    /// `logic`, not inside a paint pass.
+    Browse,
+    /// «Проверить обновления» (§4.7): spawns the forced check with the APPLIED
+    /// channel.
+    CheckNow,
+    /// «Update available» row opens the update dialog child viewport (§4.7).
+    OpenUpdateDialog,
+}
+
+/// Paint-side state of the settings CHILD viewport. The viewport callback is
+/// `Send + Sync + 'static` (egui 0.37), so it cannot borrow `SettingsApp`
+/// (`OverlayHost`, `ToastService`, texture handles, the controller are all
+/// app-owned); this struct is the snapshot the callback paints from and writes
+/// back to. `SettingsApp` stays authoritative: every pass pushes what changed
+/// and adopts what the paint changed, so the draft lives in exactly one place
+/// at a time and `logic` still owns every side effect.
+pub(crate) struct SettingsUi {
+    /// Draft being edited in the child window (§4.4). Mutated by the paint.
+    pub(crate) draft: Settings,
+    /// Last applied settings — the `is_dirty` reference and the Cancel revert.
+    pub(crate) applied: Settings,
+    /// Active tab. Mutated by the paint's tab strip.
+    pub(crate) tab: Tab,
+    /// Row waiting for a KEY press (§4.4). Mutated by the paint's capture
+    /// toggles; the controller transition it caused is recorded next to it.
+    pub(crate) capture_press: Option<Action>,
+    /// Row waiting for a PAD press (§4.4, Stage 5). Mutated by the paint; the
+    /// mailbox write is derived in `logic` from the slot delta.
+    pub(crate) capture_pad: Option<Action>,
+    /// Pause/restore the paint's capture change caused, recorded with its CAUSE
+    /// (`Click`, `Escape`, `Commit`, `Clear`) exactly as the root `ui` pass
+    /// mapped it inline. `logic` applies it and clears the slot (`take`), so a
+    /// press that changed nothing records nothing.
+    pub(crate) capture_transition: Option<binding::CaptureTransition>,
+    /// Registration statuses the rows render (§4.1/§4.4).
+    pub(crate) status: Vec<Registration>,
+    /// Warning triangle texture (`Arc` so the `'static` callback can share it;
+    /// an O(1) refcount bump, and the paint derefs it for `TextureHandle::id`).
+    pub(crate) warning_icon: Option<Arc<egui::TextureHandle>>,
+    /// Whether hotkeys are available at all (`hotkey.unavailable_label` line).
+    pub(crate) controller_available: bool,
+    /// Held update discovery for the General row (§4.7).
+    pub(crate) update: Option<crate::update::UpdateInfo>,
+    /// Install lifecycle for the row and its buttons (§4.7).
+    pub(crate) update_status: update::UpdateStatus,
+    /// Last FORCED-check result line (§4.7, Stage 11 sub-item 2).
+    pub(crate) forced_check_status: Option<update::ForcedCheckStatus>,
+    /// A forced check is running: the result line renders nothing.
+    pub(crate) forced_check_in_flight: bool,
+    /// Any check in flight: disables the Check button (§4.7).
+    pub(crate) check_in_flight: bool,
+    /// Presses recorded by the paint pass, drained by `logic` (`take`).
+    pub(crate) actions: Vec<SettingsAction>,
+    /// Chip the Overlay tab built from the draft (§4.3 test button); `logic`
+    /// publishes it through the toast hand-off — the paint cannot reach the
+    /// handle. Latest-only: one click per frame, overwritten if overwritten.
+    pub(crate) pending_overlay_test: Option<Toast>,
+    /// The paint pass ran since the last push: `logic` adopts the paint's
+    /// draft/tab/capture ONLY while this is set. A hidden child paints
+    /// NOTHING, so without this gate a stale snapshot would resurrect an old
+    /// draft over a pad-pump or probe commit made while hidden.
+    pub(crate) painted_dirty: bool,
+}
+
+impl SettingsUi {
+    /// Empty starting snapshot; the FIRST `logic` pass pushes the real state
+    /// before the child is ever registered, so no paint ever sees these
+    /// defaults. The defaults mirror `SettingsApp::new`'s init (General tab,
+    /// no capture, no discovery), so a hypothetical early paint is consistent.
+    fn starting() -> Self {
+        Self {
+            draft: Settings::default(),
+            applied: Settings::default(),
+            tab: Tab::General,
+            capture_press: None,
+            capture_pad: None,
+            capture_transition: None,
+            status: Vec::new(),
+            warning_icon: None,
+            controller_available: false,
+            update: None,
+            update_status: update::UpdateStatus::Idle,
+            forced_check_status: None,
+            forced_check_in_flight: false,
+            check_in_flight: false,
+            actions: Vec::new(),
+            pending_overlay_test: None,
+            painted_dirty: false,
+        }
+    }
+
+    /// Paint the whole settings window in the CHILD viewport: capture-key
+    /// handling first, then the docked bottom bar, then the tab content — the
+    /// exact layout the root window used before spec v3. Records presses into
+    /// `actions` and the overlay chip into `pending_overlay_test`; nothing
+    /// here touches the controller, the config file, or the toast hand-off.
+    pub(crate) fn paint(&mut self, ui: &mut egui::Ui, close: &AtomicBool) {
+        // A CHILD paint pass is the ONLY place an OS close request for this
+        // viewport is observable (eframe pushes `ViewportEvent::Close` into the
+        // CHILD's `ViewportInfo` — `glow_integration.rs:1075` — and clears it
+        // after the pass); `logic` reads the flag next pass. About precedent
+        // (`about::paint`).
+        if ui.input(|i| i.viewport().close_requested()) {
+            close.store(true, Ordering::Relaxed);
+        }
+        self.painted_dirty = true;
+        self.handle_capture_press(ui);
+        // Pad capture keys (§4.4, v2) run in the same pass, before the tabs are
+        // painted, so a cleared pad slot shows in this frame. The two captures
+        // are mutually exclusive (`set_keyboard_capture` clears both), so one
+        // key press can never be handled twice.
+        self.handle_pad_capture_press(ui);
+
+        // The child inherits the root's ALPHA-0 GL clear (`clear_color` is one
+        // clear color for every viewport), so the window needs its own OPAQUE
+        // backdrop: `Frame::central_panel` (panel fill) wrapped around the
+        // panels, the same recipe as `about::paint` (`about.rs:240`).
+        let frame = egui::Frame::central_panel(ui.style());
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            // Bottom row (spec §4.4): `Apply | OK | Cancel` docked to the window's
+            // BOTTOM EDGE as a real bottom panel, with the "Unsaved changes"
+            // indicator on the left of the same row. Docking is what keeps the row
+            // visible when the tab content grows (the placeholder accordion); the
+            // content is the `CentralPanel` below, which shrinks instead.
+            // Save (Apply/OK) is gated by TWO draft checks (§4.4): every row needs
+            // a key (`draft_savable` — Stage 2) AND the triggers must be unique
+            // (`duplicate_bindings` — Stage 3, one combo or pad must trigger one
+            // action); Cancel discards, so it stays enabled. The disabled-button
+            // tooltip names whichever save gate blocks.
+            // `right_to_left` lays widgets out from the right edge, so they are
+            // added rightmost-first: Cancel, OK, Apply. Clicks are recorded, not
+            // acted on: the effects (`apply()`, the process exit) belong to
+            // `logic`, which adopts this snapshot on the next pass.
+            // egui reserves panels outermost-first and the `CentralPanel` must be
+            // added last, so the bottom panel comes before the tab content.
+            egui::Panel::bottom(chrome::BOTTOM_BAR_PANEL_ID).show(ui, |ui| {
+                let unbound = !binding::draft_savable(&self.draft);
+                let duplicates = binding::duplicate_bindings(&self.draft);
+                let savable = !unbound && duplicates.is_empty();
+                let buttons = chrome::bottom_buttons_enabled(
+                    chrome::is_dirty(&self.draft, &self.applied),
+                    savable,
+                );
+                let blocked_tooltip = if unbound {
+                    Some(binding::unbound_save_tooltip())
+                } else if !duplicates.is_empty() {
+                    Some(binding::duplicate_save_tooltip())
+                } else {
+                    None
+                };
+                let mut apply_clicked = false;
+                let mut ok_clicked = false;
+                let mut cancel_clicked = false;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    cancel_clicked = ui
+                        .add_enabled(
+                            buttons.cancel_enabled,
+                            egui::Button::new(rust_i18n::t!("bottom.cancel")),
+                        )
+                        .clicked();
+                    let ok_response = ui.add_enabled(
+                        buttons.ok_enabled,
+                        egui::Button::new(rust_i18n::t!("bottom.ok")),
+                    );
+                    let apply_response = ui.add_enabled(
+                        buttons.apply_enabled,
+                        egui::Button::new(rust_i18n::t!("bottom.apply")),
+                    );
+                    // Only a blocked save gets a hint: a clean draft is disabled
+                    // for dirtiness alone and needs no tooltip. The tooltip method
+                    // consumes the response, so it is rebound.
+                    let ok_response = if let Some(tooltip) = &blocked_tooltip {
+                        ok_response.on_disabled_hover_text(tooltip)
+                    } else {
+                        ok_response
+                    };
+                    let apply_response = if let Some(tooltip) = &blocked_tooltip {
+                        apply_response.on_disabled_hover_text(tooltip)
+                    } else {
+                        apply_response
+                    };
+                    ok_clicked = ok_response.clicked();
+                    apply_clicked = apply_response.clicked();
+                    if chrome::is_dirty(&self.draft, &self.applied) {
+                        ui.label(rust_i18n::t!("bottom.unsaved_changes"));
+                    }
+                });
+
+                if apply_clicked {
+                    self.actions.push(SettingsAction::Apply);
+                }
+                if ok_clicked {
+                    self.actions.push(SettingsAction::Ok);
+                }
+                if cancel_clicked {
+                    self.actions.push(SettingsAction::Cancel);
+                }
+            });
+
+            // Tab content fills whatever height the docked bottom bar left.
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for tab in [Tab::General, Tab::Hotkeys, Tab::Overlay] {
+                        if ui.selectable_label(self.tab == tab, tab.label()).clicked() {
+                            self.tab = tab;
+                        }
+                    }
+                });
+                ui.separator();
+
+                match self.tab {
+                    Tab::General => self.general_tab(ui),
+                    Tab::Hotkeys => self.hotkeys_tab(ui),
+                    Tab::Overlay => self.overlay_tab(ui),
+                }
+            });
+        });
     }
 }
 
@@ -220,8 +516,11 @@ pub(crate) struct SettingsApp {
     /// Warning status icon: the embedded triangle texture uploaded once in
     /// `run`'s create closure (`icons::warning_icon_texture`). `None` when the asset
     /// decode failed (logged at WARN) — warning rows then paint the ASCII
-    /// `!` glyph in the same reserved slot.
-    pub(crate) warning_icon: Option<egui::TextureHandle>,
+    /// `!` glyph in the same reserved slot. `Arc` because the settings CHILD
+    /// callback is `Send + Sync + 'static` and needs an owned handle; the push
+    /// into the paint snapshot is a refcount bump, and `paint_warning_slot`
+    /// derefs it for `TextureHandle::id`.
+    pub(crate) warning_icon: Option<Arc<egui::TextureHandle>>,
     /// Set by the tray `Exit` action only (spec §4.5): the next close request
     /// is not cancelled, so eframe shuts down.
     exit_requested: bool,
@@ -230,6 +529,52 @@ pub(crate) struct SettingsApp {
     /// The plain X button leaves it `false` and keeps the hide-to-tray
     /// behaviour (§4.5).
     close_for_exit: bool,
+    /// First-start hidden to the tray (task 2026-11-15_settings-first-start-only):
+    /// set when the process started with the window hidden (`gui::run` received
+    /// `visible: false`, spec §4.5). `with_visible(false)` is not enough —
+    /// eframe reveals the ROOT window after its FIRST painted frame whatever the
+    /// viewport builder said (`eframe native/epi_integration.rs:443-448`:
+    /// `post_rendering` takes `is_first_frame` and calls `window.set_visible(true)`),
+    /// and on Windows that first paint is synchronous at `Event::Resumed`, so the
+    /// settings window flashes. `logic` therefore re-sends
+    /// `ViewportCommand::Visible(false)` on EVERY pass (`eframe native`
+    /// `epi_integration.rs:443-448`: `post_rendering` takes `is_first_frame` and
+    /// calls `window.set_visible(true)` — the reveal happens after a paint, so a
+    /// one-shot hide would be undone by the next frame). Under spec v3 the flag
+    /// is NEVER cleared: the root window is never shown at all — a tray
+    /// ShowSettings raises the settings CHILD window instead
+    /// ([`SettingsApp::show_from_tray`]), so the suppression block runs on every
+    /// pass of the whole process lifetime.
+    startup_hidden: bool,
+    /// Paint-side state of the settings CHILD viewport (spec v3 §4.5). Shared
+    /// with the `'static` viewport callback; `logic` pushes the authoritative
+    /// state into it and adopts the paint's edits, exactly like About's close
+    /// flag and the dialog's press slot — one mutex for genuinely shared
+    /// mutable state, no channel needed because only one thread paints.
+    settings_ui: Arc<Mutex<SettingsUi>>,
+    /// The child paint pass has run at least once (`OverlayHost` chip
+    /// precedent, `host.rs:390-404`): the first-run reveal waits for the
+    /// window to have painted, because `Visible(true)` for a viewport that was
+    /// never CREATED is dropped — commands reach existing viewports only.
+    settings_painted: Arc<AtomicBool>,
+    /// Set by the CHILD paint pass when the OS close button (X) was pressed.
+    /// `logic` hides the child on the next pass — the HideToTray semantics the
+    /// root window used (§4.5), now applied to the child viewport.
+    settings_close: Arc<AtomicBool>,
+    /// The settings child is visible right now (a tray show or the first-run
+    /// reveal set it; the child's own X cleared it). Drives `Focus` vs
+    /// `Visible(true)` in [`SettingsApp::show_from_tray`] and the steady
+    /// repaint schedule.
+    settings_shown: bool,
+    /// First run (`main.rs`: no config file existed): reveal the child once its
+    /// first paint is done. Never reveals again — a later tray show/close
+    /// cycle runs on `settings_shown`, not on this flag.
+    settings_open_on_start: bool,
+    /// The first-run reveal has fired. Together with `settings_open_on_start`
+    /// this makes the reveal ONE-SHOT: after the child's own X (or a tray
+    /// hide) the flag stays set, so the window is never re-shown behind the
+    /// user's back; only a tray show raises it again.
+    settings_revealed: bool,
     /// Last root-viewport focus seen by `logic` (`None` = no pass yet), so the
     /// Stage 13 retry fires on the transition INTO focus only — see
     /// [`binding::should_retry_failed_registrations`].
@@ -345,6 +690,31 @@ pub(crate) struct SettingsApp {
 }
 
 impl SettingsApp {
+    /// Tray ShowSettings (spec v3 §4.5): raise or open the settings CHILD
+    /// window. A closed-but-registered child is RE-SHOWN (`Visible(true)` —
+    /// egui keeps the viewport alive while it stays registered, so the OS
+    /// window is still there, just hidden); an already-shown child is RAISED
+    /// (`Focus`). The ROOT window is never touched: it stays hidden for the
+    /// whole run, and `startup_hidden` is never cleared — the same distinction
+    /// the About child makes between open and raise (`about::AboutWindow`).
+    pub(crate) fn show_from_tray(&mut self, ctx: &egui::Context) {
+        let settings = settings_child_viewport_id();
+        if self.settings_shown {
+            ctx.send_viewport_cmd_to(settings, egui::ViewportCommand::Focus);
+        } else {
+            self.settings_shown = true;
+            ctx.send_viewport_cmd_to(settings, egui::ViewportCommand::Visible(true));
+        }
+        ctx.request_repaint();
+    }
+
+    /// Build the settings-window app. `startup_hidden` is always `true` under
+    /// spec v3 (the ROOT window never shows); while it is set, `logic` keeps
+    /// sending `ViewportCommand::Visible(false)` on every pass to undo eframe's
+    /// first-frame reveal (see [`SettingsApp::startup_hidden`]); `open_settings_on_start`
+    /// is the first-run flag from `main.rs`: `true` when no config file existed,
+    /// so the settings CHILD window is revealed after its first paint instead of
+    /// waiting for a tray show.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config_path: PathBuf,
@@ -360,6 +730,8 @@ impl SettingsApp {
         update_rx: mpsc::Receiver<crate::update::CheckOutcome>,
         update_tx: mpsc::Sender<crate::update::CheckOutcome>,
         restart_requested: Arc<AtomicBool>,
+        startup_hidden: bool,
+        open_settings_on_start: bool,
     ) -> Self {
         Self {
             config_path,
@@ -379,6 +751,13 @@ impl SettingsApp {
             warning_icon: None,
             exit_requested: false,
             close_for_exit: false,
+            startup_hidden,
+            settings_ui: Arc::new(Mutex::new(SettingsUi::starting())),
+            settings_painted: Arc::new(AtomicBool::new(false)),
+            settings_close: Arc::new(AtomicBool::new(false)),
+            settings_shown: false,
+            settings_open_on_start: open_settings_on_start,
+            settings_revealed: false,
             viewport_focused: None,
             about_window: crate::about::AboutWindow::new(),
             about_changelog_cache: Arc::new(
@@ -500,28 +879,89 @@ impl SettingsApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         ctx.request_repaint();
     }
+
+    /// Push the authoritative state into the settings CHILD's paint snapshot
+    /// (spec v3 §4.5). Every deep field is compared first — `Settings`, the
+    /// registration list and the update/status values are owned values, so an
+    /// unconditional copy on every pass would be an event-loop clone; unchanged
+    /// fields are left alone. The texture handle and the controller flag are
+    /// cheap either way. Called LAST in `logic`, after every mutation, so the
+    /// next paint pass (which runs before the next `logic`) sees exactly this.
+    fn sync_settings_ui(&self) {
+        let mut state = self
+            .settings_ui
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.draft != self.draft {
+            state.draft.clone_from(&self.draft);
+        }
+        if state.applied != self.applied {
+            state.applied.clone_from(&self.applied);
+        }
+        state.tab = self.tab;
+        state.capture_press = self.capture_press;
+        state.capture_pad = self.capture_pad;
+        if state.status != self.status {
+            state.status.clone_from(&self.status);
+        }
+        // The texture handle is shared by refcount, not copied; the pointer
+        // check skips even the bump when the paint already holds this handle.
+        match (&state.warning_icon, &self.warning_icon) {
+            (Some(painted), Some(app_handle)) if Arc::ptr_eq(painted, app_handle) => {}
+            _ => state.warning_icon = self.warning_icon.as_ref().map(Arc::clone),
+        }
+        state.controller_available = self.controller.is_some();
+        if state.update_status != self.update_status {
+            state.update_status.clone_from(&self.update_status);
+        }
+        if state.forced_check_status != self.forced_check_status {
+            state
+                .forced_check_status
+                .clone_from(&self.forced_check_status);
+        }
+        state.forced_check_in_flight = self.forced_check_in_flight;
+        state.check_in_flight = self.check_in_flight;
+        // `UpdateInfo` is `Clone` but not `PartialEq` (it holds digest and size
+        // strings); its identity is the release it describes, so the short
+        // fields decide whether the paint needs a fresh copy.
+        let update_changed = match (state.update.as_ref(), self.update.as_ref()) {
+            (None, None) => false,
+            (Some(_), None) | (None, Some(_)) => true,
+            (Some(painted), Some(app_info)) => {
+                painted.version != app_info.version
+                    || painted.archive_url != app_info.archive_url
+                    || painted.size != app_info.size
+            }
+        };
+        if update_changed {
+            state.update.clone_from(&self.update);
+        }
+    }
 }
 
 impl eframe::App for SettingsApp {
-    /// Runs even while the window is hidden (no UI pass then). Keeps the
-    /// process resident after a window close (spec §4.4): cancel the close
-    /// request and hide the window instead — the tray (Stage 10) can reopen
-    /// it. Closing discards unsaved draft edits (spec §4.4). The toast
-    /// lifecycle runs here too, so a hotkey fired while the window is hidden
-    /// still shows its toast (spec §4.3). Tray actions are polled every pass:
-    /// left click / `Settings` re-shows the window, `Take screenshot` spawns
-    /// a full-screen capture with the applied settings + the shared mailbox,
+    /// Runs even while the ROOT window is hidden (no UI pass then; the settings
+    /// UI paints in the CHILD viewport). Keeps the process resident after the
+    /// settings window closes (spec §4.4): the CHILD viewport is hidden with
+    /// `Visible(false)` and stays REGISTERED — hidden ≠ destroyed — instead of
+    /// being closed, so the tray can re-show the very same window. Closing
+    /// discards unsaved draft edits (spec §4.4). The toast lifecycle runs here
+    /// too, so a hotkey fired while the settings window is hidden still shows
+    /// its toast (spec §4.3). Tray actions are polled every pass: left click /
+    /// `Settings` SHOWS the settings CHILD (`Visible(true)`) or RAISES it
+    /// (`Focus`) when it is already shown, `Take screenshot` spawns a
+    /// full-screen capture with the applied settings + the shared mailbox,
     /// `About` opens the About child viewport if closed and RAISES it (Focus)
     /// if already open (task 2026-11-10_about-dialog),
     /// `Exit` requests a real shutdown (spec §4.5 — exit is tray-menu-only).
+    /// While the process started hidden to the tray, every pass also re-sends
+    /// `Visible(false)` to the ROOT to undo eframe's first-frame reveal (see
+    /// [`SettingsApp::startup_hidden`]).
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(tray) = &self.tray {
             for action in tray.poll() {
                 match action {
-                    TrayAction::ShowSettings => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.request_repaint();
-                    }
+                    TrayAction::ShowSettings => self.show_from_tray(ctx),
                     TrayAction::TakeScreenshot => {
                         capture::spawn_capture(
                             capture::CaptureCommand {
@@ -563,6 +1003,201 @@ impl eframe::App for SettingsApp {
                     }
                 }
             }
+        }
+
+        // First-start hidden suppression (task 2026-11-15_settings-first-start-only,
+        // spec §4.5): eframe reveals the ROOT window after its FIRST painted frame
+        // whatever `ViewportBuilder::with_visible` said
+        // (`eframe native/epi_integration.rs:443-448` — `post_rendering` takes
+        // `is_first_frame` and calls `window.set_visible(true)`), so a process
+        // started hidden to the tray flashes the settings window: on Windows the
+        // first paint is synchronous at `Event::Resumed`. Re-sending
+        // `Visible(false)` on EVERY pass hides it again within milliseconds of the
+        // reveal — `logic` runs before the paint of each frame, and egui-winit
+        // honours the command (`egui-winit lib.rs:2013` → winit `set_visible`).
+        // It sits AFTER the tray poll above on purpose: egui-winit applies queued
+        // commands in order (`egui-winit lib.rs:1934`), so a `Visible(false)`
+        // before the poll would overwrite a `Visible(true)` the same pass queued
+        // for the settings CHILD show. Under spec v3 the flag is never cleared,
+        // so this block runs on every pass of the process lifetime.
+        if self.startup_hidden {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        // ── Settings CHILD viewport (task 2026-11-15_settings-first-start-only,
+        // spec v3 §4.5) ──
+        // The settings UI lives in a Deferred child window; the ROOT window is
+        // never shown. This block runs right after the suppression above and
+        // BEFORE the update/check blocks, so a press the child recorded
+        // («Проверить обновления», the dialog open) acts on the same pass — the
+        // ordering the root `ui` pass had when it painted before `logic`.
+        let settings = settings_child_viewport_id();
+
+        // Adopt what the child paint pass changed. `painted_dirty` gates it:
+        // a HIDDEN child paints nothing, and its snapshot then holds whatever
+        // the last push left — adopting that would resurrect a draft the pad
+        // pump, a probe commit or an X-close reverted while hidden. The child
+        // paints BEFORE this root pass (`run.rs:147-152`), exactly like the old
+        // root `ui` pass, so the paint's draft edits are adopted first and the
+        // logic-side drains below apply on top of them.
+        let capture_before = (self.capture_press, self.capture_pad);
+        let paint_changed;
+        let actions;
+        let overlay_chip;
+        let capture_transition;
+        {
+            let mut state = self
+                .settings_ui
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            actions = std::mem::take(&mut state.actions);
+            overlay_chip = state.pending_overlay_test.take();
+            paint_changed = state.painted_dirty;
+            capture_transition = state.capture_transition.take();
+            if paint_changed {
+                // `Settings` is the expensive field: adopt it only when the paint
+                // actually edited it. Tab and capture slots are `Copy`, so the
+                // assignment is a cheap no-op when the paint changed nothing.
+                if state.draft != self.draft {
+                    self.draft.clone_from(&state.draft);
+                }
+                self.tab = state.tab;
+                self.capture_press = state.capture_press;
+                self.capture_pad = state.capture_pad;
+                state.painted_dirty = false;
+            }
+        }
+
+        // Button presses the child recorded (§4.4, §4.7). Every effect needs
+        // app state the `'static` callback cannot reach, so they run here.
+        for action in actions {
+            match action {
+                SettingsAction::Apply => self.apply(),
+                SettingsAction::Ok => {
+                    self.apply();
+                    self.request_window_exit(ctx);
+                }
+                SettingsAction::Cancel => {
+                    self.draft = chrome::cancel_draft(&self.draft, &self.applied);
+                    self.cancel_active_capture();
+                    self.request_window_exit(ctx);
+                }
+                SettingsAction::Browse => self.browse_save_path(),
+                SettingsAction::CheckNow => self.check_now_requested = true,
+                SettingsAction::OpenUpdateDialog => self.open_update_dialog(),
+            }
+        }
+        // Overlay test chip (§4.3): the paint built it from the draft; the toast
+        // hand-off lives on the app side, so it is published here — still before
+        // `overlay_host.update` below, the ordering the root `ui` pass had.
+        if let Some(chip) = overlay_chip {
+            self.publish_overlay_test_chip(chip);
+        }
+
+        // Capture side effects the CHILD paint recorded (§4.4). The transition
+        // names its CAUSE — click, Escape, committed key, Backspace clear — as
+        // `binding::capture_transition` mapped it when the root `ui` pass still
+        // applied the pause/restore inline. Keyboard capture pauses the hotkey
+        // registrations and arms the probe; any capture end restores them. The
+        // pad mailbox tells the pump which row is waiting for a button (§4.4,
+        // Stage 5); pad capture never pauses, so only the slot delta matters there.
+        if paint_changed {
+            if let Some(transition) = capture_transition {
+                self.apply_capture_transition(transition);
+            }
+            if (self.capture_press, self.capture_pad) != capture_before {
+                let mode = match (self.capture_press, self.capture_pad) {
+                    (Some(action), _) => Some((crate::gamepad::CaptureField::Keyboard, action)),
+                    (None, Some(action)) => Some((crate::gamepad::CaptureField::Pad, action)),
+                    (None, None) => None,
+                };
+                crate::gamepad::set_capture_mode(&self.pad_capture, mode);
+            }
+        }
+
+        // The child's own X button (HideToTray, §4.5): hide the window, KEEP the
+        // viewport registered (hidden ≠ destroyed — egui GCs an unregistered
+        // child, so a hidden child that stops being registered would be dropped
+        // and a tray show would have to build a new window), and discard the
+        // draft like the root window's X did.
+        if self.settings_close.swap(false, Ordering::Relaxed) {
+            self.settings_shown = false;
+            ctx.send_viewport_cmd_to(settings, egui::ViewportCommand::Visible(false));
+            // The revert needs an owned copy: `draft` and `applied` are two
+            // separate values again after this, not aliases of one.
+            self.draft = self.applied.clone();
+            ctx.request_repaint();
+        }
+
+        // First-run reveal (§4.5): the child is shown once it has PAINTED, never
+        // again — `Visible(true)` for a viewport with no OS window yet is dropped
+        // (commands reach existing viewports only), and painting is what creates
+        // the window. A hidden startup never takes this branch, and a later X
+        // close does not re-trigger it (`settings_revealed`).
+        if self.settings_open_on_start
+            && !self.settings_shown
+            && !self.settings_revealed
+            && self.settings_painted.load(Ordering::Relaxed)
+        {
+            self.settings_shown = true;
+            self.settings_revealed = true;
+            ctx.send_viewport_cmd_to(settings, egui::ViewportCommand::Visible(true));
+            ctx.request_repaint();
+        }
+
+        // Paint requests. A Deferred child window is created only by the FULL
+        // pass (`glow_integration.rs::handle_viewport_output`); a hidden root
+        // runs the logic-only branch, which applies commands for EXISTING
+        // viewports and creates nothing. So while the child has no OS window the
+        // ROOT is asked for a paint it would otherwise skip
+        // (`RequestPaintWhileHidden`, `OverlayHost`'s root block,
+        // `crates/overlay/src/host.rs:520-543`) — gated on the ROOT actually
+        // reporting hidden, and gated on the child not existing yet so a hidden
+        // root is not painted forever. The CHILD is asked to paint ONLY when it
+        // is meant to be seen: a hidden child paint would fire eframe's single
+        // `is_first_frame` reveal (`epi_integration.rs:443-448`, reached from
+        // `glow_integration.rs:931` because a paint request makes
+        // `is_visible` true, `glow_integration.rs:678-684`) and flash a settings
+        // window that startup meant to keep hidden.
+        if !child_viewport_has_window(ctx, settings)
+            && ctx.input(|i| {
+                i.raw
+                    .viewports
+                    .get(&egui::ViewportId::ROOT)
+                    .and_then(|v| v.visible())
+                    == Some(false)
+            })
+        {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::RequestPaintWhileHidden,
+            );
+        }
+        if self.settings_open_on_start
+            && !self.settings_shown
+            && !self.settings_painted.load(Ordering::Relaxed)
+        {
+            ctx.send_viewport_cmd_to(settings, egui::ViewportCommand::RequestPaintWhileHidden);
+        }
+
+        // Register the child on EVERY pass — hidden included. The callback is
+        // `'static`, so it carries `Arc` clones of the shared paint state
+        // (refcount bumps, not deep copies) and paints through the snapshot.
+        let paint_state = Arc::clone(&self.settings_ui);
+        let painted = Arc::clone(&self.settings_painted);
+        let close_flag = Arc::clone(&self.settings_close);
+        ctx.show_viewport_deferred(settings, settings_child_builder(), move |ui, _class| {
+            let mut state = paint_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.paint(ui, &close_flag);
+            painted.store(true, Ordering::Relaxed);
+        });
+        // Steady cadence while the window is on screen; a hidden window needs
+        // no repaint, and the interval pin stays gated on the child having an
+        // OS window (`schedule_child_viewport_repaint`).
+        if self.settings_shown {
+            schedule_child_viewport_repaint(ctx, settings);
         }
 
         // About child viewport (task 2026-11-10_about-dialog, stage 10):
@@ -958,8 +1593,13 @@ impl eframe::App for SettingsApp {
                         );
                     }
                     chrome::CloseAction::HideToTray => {
-                        // Plain window close (the X button): hide to the tray and
-                        // discard the draft — the process stays resident (§4.5).
+                        // Defensive fallback only: under spec v3 the ROOT window
+                        // is undecorated and never shown, so a ROOT close request
+                        // cannot reach this branch — the settings X lives in the
+                        // CHILD viewport and is handled by the child-close block
+                        // above. If a root close ever does arrive, hide to the
+                        // tray and discard the draft (§4.5): the process stays
+                        // resident.
                         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                         self.draft = self.applied.clone();
@@ -1012,6 +1652,13 @@ impl eframe::App for SettingsApp {
         }
         self.viewport_focused = focused;
 
+        // Push the authoritative state into the child's paint snapshot LAST,
+        // after every logic-side mutation above (drains, close revert, focus
+        // retry), so the next paint pass — which runs before the next `logic` —
+        // starts from exactly this state. Conditional `clone_from`s keep the
+        // push cheap: unchanged values are compared, not copied.
+        self.sync_settings_ui();
+
         // Tray events arrive on crossbeam channels and never wake the winit
         // loop; schedule the next logic pass so polling stays alive while the
         // window is hidden. The toast service wakes the same context on its
@@ -1035,121 +1682,12 @@ impl eframe::App for SettingsApp {
         egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.handle_capture_press(ui);
-        // Pad capture keys (§4.4, v2) run in the same pass, before the tabs are
-        // painted, so a cleared pad slot shows in this frame. The two captures
-        // are mutually exclusive (`set_keyboard_capture` clears both), so one
-        // key press can never be handled twice.
-        self.handle_pad_capture_press(ui);
-
-        // Bottom row (spec §4.4): `Apply | OK | Cancel` docked to the window's
-        // BOTTOM EDGE as a real bottom panel, with the "Unsaved changes"
-        // indicator on the left of the same row. Docking is what keeps the row
-        // visible when the tab content grows (the placeholder accordion); the
-        // content is the `CentralPanel` below, which shrinks instead.
-        // Save (Apply/OK) is gated by TWO draft checks (§4.4): every row needs
-        // a key (`draft_savable` — Stage 2) AND the triggers must be unique
-        // (`duplicate_bindings` — Stage 3, one combo or pad must trigger one
-        // action); Cancel discards, so it stays enabled. The disabled-button
-        // tooltip names whichever save gate blocks.
-        // `right_to_left` lays widgets out from the right edge, so they are
-        // added rightmost-first: Cancel, OK, Apply. Clicks are collected in the
-        // layout pass and acted on after it, so the draft borrow ends before
-        // anything mutates it.
-        // egui reserves panels outermost-first and the `CentralPanel` must be
-        // added last, so the bottom panel comes before the tab content.
-        egui::Panel::bottom(chrome::BOTTOM_BAR_PANEL_ID).show(ui, |ui| {
-            let unbound = !binding::draft_savable(&self.draft);
-            let duplicates = binding::duplicate_bindings(&self.draft);
-            let savable = !unbound && duplicates.is_empty();
-            let buttons = chrome::bottom_buttons_enabled(
-                chrome::is_dirty(&self.draft, &self.applied),
-                savable,
-            );
-            let blocked_tooltip = if unbound {
-                Some(binding::unbound_save_tooltip())
-            } else if !duplicates.is_empty() {
-                Some(binding::duplicate_save_tooltip())
-            } else {
-                None
-            };
-            let mut apply_clicked = false;
-            let mut ok_clicked = false;
-            let mut cancel_clicked = false;
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                cancel_clicked = ui
-                    .add_enabled(
-                        buttons.cancel_enabled,
-                        egui::Button::new(rust_i18n::t!("bottom.cancel")),
-                    )
-                    .clicked();
-                let ok_response = ui.add_enabled(
-                    buttons.ok_enabled,
-                    egui::Button::new(rust_i18n::t!("bottom.ok")),
-                );
-                let apply_response = ui.add_enabled(
-                    buttons.apply_enabled,
-                    egui::Button::new(rust_i18n::t!("bottom.apply")),
-                );
-                // Only a blocked save gets a hint: a clean draft is disabled
-                // for dirtiness alone and needs no tooltip. The tooltip method
-                // consumes the response, so it is rebound.
-                let ok_response = if let Some(tooltip) = &blocked_tooltip {
-                    ok_response.on_disabled_hover_text(tooltip)
-                } else {
-                    ok_response
-                };
-                let apply_response = if let Some(tooltip) = &blocked_tooltip {
-                    apply_response.on_disabled_hover_text(tooltip)
-                } else {
-                    apply_response
-                };
-                ok_clicked = ok_response.clicked();
-                apply_clicked = apply_response.clicked();
-                if chrome::is_dirty(&self.draft, &self.applied) {
-                    ui.label(rust_i18n::t!("bottom.unsaved_changes"));
-                }
-            });
-
-            if apply_clicked {
-                // Apply: save + re-register + publish (§4.4); the window stays open.
-                self.apply();
-            }
-            if ok_clicked {
-                // OK: the same `apply()` as Apply, then a real close (§4.4) —
-                // not the hide-to-tray the X button performs.
-                self.apply();
-                self.request_window_exit(ui.ctx());
-            }
-            if cancel_clicked {
-                // Cancel: the draft is discarded — nothing is saved or
-                // published — any bind capture is cancelled, and the window
-                // closes the same way as OK (§4.4).
-                self.draft = chrome::cancel_draft(&self.draft, &self.applied);
-                self.cancel_active_capture();
-                self.request_window_exit(ui.ctx());
-            }
-        });
-
-        // Tab content fills whatever height the docked bottom bar left.
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for tab in [Tab::General, Tab::Hotkeys, Tab::Overlay] {
-                    if ui.selectable_label(self.tab == tab, tab.label()).clicked() {
-                        self.tab = tab;
-                    }
-                }
-            });
-            ui.separator();
-
-            match self.tab {
-                Tab::General => self.general_tab(ui),
-                Tab::Hotkeys => self.hotkeys_tab(ui),
-                Tab::Overlay => self.overlay_tab(ui),
-            }
-        });
-    }
+    /// The ROOT window never shows (spec v3 §4.5): the settings UI lives in the
+    /// CHILD viewport registered by `logic`, so this pass draws nothing. eframe
+    /// still calls it on every painted frame (including the hidden paints the
+    /// creation phase asks for), and an empty body costs nothing — the capture
+    /// keys, bottom bar and tabs all paint in `SettingsUi::paint`.
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 }
 
 #[cfg(test)]

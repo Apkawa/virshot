@@ -1,7 +1,9 @@
 //! Hotkeys tab (spec §4.4): the row catalog labels and hints, the bind-by-press
 //! capture wiring for both fields (keyboard + gamepad probe, pad pump mailbox),
-//! and the tab painting. The `SettingsApp` methods live in this file; `gui/app.rs`
-//! drives them from the `logic`/`ui` passes. Pure binding decisions stay in
+//! and the tab painting. The paint methods live in `impl SettingsUi` and run in
+//! the settings CHILD viewport; the controller transition, the pad mailbox write
+//! and the probe commit live in `impl SettingsApp` and run in `gui/app.rs`'s
+//! `logic` pass (spec v3 §4.5). Pure binding decisions stay in
 //! [`super::binding`], status icons in [`super::icons`].
 
 use crate::bindings::Action;
@@ -16,6 +18,7 @@ use crate::hotkeys::Registration;
 use crate::hotkeys::key_label;
 
 use super::SettingsApp;
+use super::SettingsUi;
 use super::binding;
 use super::icons;
 
@@ -65,7 +68,35 @@ fn bind_hint() -> String {
     rust_i18n::t!("hotkey.bind_hint").into_owned()
 }
 
+/// Logic-side row accessors. `SettingsApp` owns the draft that `apply()` saves,
+/// the hotkey controller and the pad mailbox, so every mutation that reaches
+/// those lives here (spec v3 §4.5).
 impl SettingsApp {
+    fn binding_mut(&mut self, action: Action) -> &mut Binding {
+        match action {
+            Action::FullScreen => &mut self.draft.controls.full_screen,
+            Action::Window => &mut self.draft.controls.window,
+            Action::Rect => &mut self.draft.controls.rect,
+        }
+    }
+
+    /// Does ANY row carry a failed registration? That is the precondition for
+    /// the Stage 13 focus retry — with a healthy report there is nothing to
+    /// retry and the controller pass is not called at all. Logic-side: only the
+    /// retry consumes it.
+    pub(crate) fn has_failed_registration(&self) -> bool {
+        self.status
+            .iter()
+            .any(|registration| matches!(registration, Registration::Failed { .. }))
+    }
+}
+
+/// Paint-side row accessors of the settings CHILD viewport (`SettingsUi`,
+/// spec v3 §4.5): the draft, the registration statuses and the warning texture
+/// come from the shared snapshot. Nothing here touches the controller or the
+/// pad mailbox — a capture toggle only moves the slot, and `logic` derives the
+/// pause/restore transition and the mailbox mode from the slot delta.
+impl SettingsUi {
     fn binding_mut(&mut self, action: Action) -> &mut Binding {
         match action {
             Action::FullScreen => &mut self.draft.controls.full_screen,
@@ -106,15 +137,6 @@ impl SettingsApp {
             })
     }
 
-    /// Does ANY row carry a failed registration? That is the precondition for
-    /// the Stage 13 focus retry — with a healthy report there is nothing to
-    /// retry and the controller pass is not called at all.
-    pub(crate) fn has_failed_registration(&self) -> bool {
-        self.status
-            .iter()
-            .any(|registration| matches!(registration, Registration::Failed { .. }))
-    }
-
     /// Reserve the status-icon slot immediately LEFT of a control and paint the
     /// warning there when that control has one (§4.4, Stage 10). The slot is
     /// allocated in every row — textured, ASCII `!` fallback, or empty — so the
@@ -153,121 +175,46 @@ impl SettingsApp {
         response.on_hover_text(tooltip);
     }
 
-    /// Keyboard bind-by-press state (Stage 18) plus the pad-capture mailbox:
-    /// while ANY field is capturing, the pad shot path stays silent (Stage 5,
-    /// spec §4.4). Any keyboard capture change — start or end — clears the pad
-    /// capture: one field captures at a time.
+    /// Keyboard bind-by-press slot of the CHILD paint pass (Stage 18, spec §4.4):
+    /// moving the slot is the paint's whole job. The pad-mailbox mode and the
+    /// pause/restore transition are handed to `logic` — the controller and the
+    /// mailbox are app state the viewport callback cannot reach. Any keyboard
+    /// capture change — start or end — clears the pad capture: one field
+    /// captures at a time.
     fn set_keyboard_capture(&mut self, action: Option<Action>) {
         self.capture_press = action;
-        set_capture_mode(
-            &self.pad_capture,
-            action.map(|action| (CaptureField::Keyboard, action)),
-        );
         self.capture_pad = None;
     }
 
-    /// Start pad capture for one row (§4.4, Stage 5, Windows only). A keyboard
-    /// capture is cancelled first (registrations restored): one field captures
-    /// at a time.
+    /// Park the pause/restore the capture change caused (§4.4, Stage 18) for
+    /// `logic` to apply. The CAUSE is recorded (`Click`, `Escape`, `Commit`,
+    /// `Clear`) exactly as `binding::capture_transition` mapped it when the root
+    /// `ui` pass applied the transition inline, so Escape-vs-Commit-vs-Backspace
+    /// semantics stay identical.
+    fn record_capture_transition(&mut self, capturing: bool, input: binding::CaptureInput) {
+        self.capture_transition = binding::capture_transition(capturing, input);
+    }
+
+    /// Start pad capture for one row (§4.4, Stage 5, Windows only): an open
+    /// keyboard capture is dropped here — one field captures at a time — and its
+    /// Escape transition is parked for `logic` to restore the live registrations.
     fn start_pad_capture(&mut self, action: Action) {
-        if self.capture_press.is_some() {
-            self.set_keyboard_capture(None);
-            if let Some(transition) =
-                binding::capture_transition(true, binding::CaptureInput::Escape)
-            {
-                self.apply_capture_transition(transition);
-            }
-        }
+        self.record_capture_transition(self.capture_press.is_some(), binding::CaptureInput::Escape);
+        self.capture_press = None;
         self.capture_pad = Some(action);
-        set_capture_mode(&self.pad_capture, Some((CaptureField::Pad, action)));
         tracing::info!("Pad capture started for {}", action.label());
     }
 
-    /// End pad capture (§4.4, v2): the mailbox returns to idle, so pad triggers
-    /// fire again. Reached by clicking the field again, by starting a keyboard
-    /// capture, and by Escape — none of which writes to the draft.
+    /// End pad capture (§4.4, v2): the slot returns to idle, so `logic` returns
+    /// the mailbox to idle and pad triggers fire again. Reached by clicking the
+    /// field again, by starting a keyboard capture, and by Escape — none of
+    /// which writes to the draft.
     fn cancel_pad_capture(&mut self) {
         self.capture_pad = None;
-        set_capture_mode(&self.pad_capture, None);
     }
 
-    /// Cancel any active bind capture — keyboard or pad — when the window
-    /// closes via OK/Cancel (§4.4): a keyboard capture had paused the live
-    /// registrations, so they are restored, and the shared pad mailbox returns
-    /// to idle so pad triggers fire again. Nothing is committed to the draft:
-    /// the caller discards it (`cancel_draft`).
-    pub(crate) fn cancel_active_capture(&mut self) {
-        let restoring = binding::capture_transition(
-            self.capture_press.is_some(),
-            binding::CaptureInput::Escape,
-        );
-        // `set_keyboard_capture(None)` clears both fields — the keyboard
-        // capture and the pad capture the mailbox carries.
-        self.set_keyboard_capture(None);
-        if let Some(transition) = restoring {
-            self.apply_capture_transition(transition);
-        }
-    }
-
-    /// Drain the press the pump committed into the draft (§4.4, Stage 5): the
-    /// notation goes to the row that was capturing and capture state ends. The
-    /// notation IS what the field shows and what config holds — the device-info
-    /// label name (`XboxX`) or the raw `unknown:<N>` fallback (§9), so no
-    /// separate per-row hint is kept. The draft is NOT
-    /// published until Apply (§4.4 semantics unchanged) — the pad trigger fires
-    /// the captured bind from then on. Runs in `logic`, so it also works with
-    /// the window hidden.
-    pub(crate) fn drain_pad_capture(&mut self) {
-        let Some(event) = take_captured(&self.pad_capture) else {
-            return;
-        };
-        // The notation is needed on BOTH branches: it goes to the row on a hit
-        // and names the dropped press on a miss, so it is computed before the
-        // decision rather than only inside the success pattern.
-        let notation = pad_notation(event);
-        let Some(target) = binding::pad_capture_target(self.capture_pad.take(), event) else {
-            // The mailbox is the shared truth, so naming it distinguishes a
-            // cancelled pad capture from a keyboard capture that never commits.
-            tracing::warn!(
-                "Pad press ignored: {notation} — no pad field is capturing (mailbox active {:?})",
-                active_capture(&self.pad_capture),
-            );
-            return;
-        };
-        let (action, notation) = target;
-        self.binding_mut(action).pad = Some(notation.clone());
-        tracing::info!("Pad bind set in draft: {} → {notation}", action.label());
-    }
-
-    /// Drive the hotkey pause/restore transition on the controller (Stage 18).
-    /// The controller owns the manager created on the MAIN thread, and `ui`/
-    /// `logic` passes run on that same thread (winit/eframe pump), so this
-    /// satisfies the WM_HOTKEY thread affinity. No controller (host without
-    /// hotkeys) → no-op.
-    ///
-    /// The bind probe (Stage 14) rides the same transition: it is registered
-    /// when a capture opens and unregistered when it ends, so the temporary
-    /// GrabPrinter-style hook — and with it the Snipping Tool block — only ever
-    /// exists while a row is capturing. `Restore` stops the probes BEFORE
-    /// restoring: a bare probe shares its crate id with a bare action binding of
-    /// the same key, so a restore first would collide with our own registration.
-    fn apply_capture_transition(&mut self, transition: binding::CaptureTransition) {
-        let Some(controller) = &mut self.controller else {
-            return;
-        };
-        match transition {
-            binding::CaptureTransition::Pause => {
-                controller.pause();
-                controller.start_bind_probe();
-            }
-            binding::CaptureTransition::Restore => {
-                controller.stop_bind_probe();
-                controller.restore();
-            }
-        }
-    }
-
-    /// Bind-by-press (spec §4.4): clicking the bind button records the next
+    /// Bind-by-press (spec §4.4, painted in the settings CHILD): clicking the
+    /// bind button records the next
     /// supported key press, REPLACING the draft binding's key+mods. Escape (or
     /// clicking the button again) cancels without changing the row; Backspace
     /// clears the keyboard half (key+mods emptied — the pad slot stays) and
@@ -295,12 +242,8 @@ impl SettingsApp {
             } = event
             {
                 if key == egui::Key::Escape {
+                    self.record_capture_transition(true, binding::CaptureInput::Escape);
                     self.set_keyboard_capture(None);
-                    if let Some(transition) =
-                        binding::capture_transition(true, binding::CaptureInput::Escape)
-                    {
-                        self.apply_capture_transition(transition);
-                    }
                     return;
                 }
                 // Backspace clears the keyboard half of the row BEFORE any key
@@ -315,12 +258,8 @@ impl SettingsApp {
                         action.label(),
                         cleared.pad.as_deref().unwrap_or("none")
                     );
+                    self.record_capture_transition(true, binding::CaptureInput::Clear);
                     self.set_keyboard_capture(None);
-                    if let Some(transition) =
-                        binding::capture_transition(true, binding::CaptureInput::Clear)
-                    {
-                        self.apply_capture_transition(transition);
-                    }
                     return;
                 }
                 let Some(name) = binding::supported_key_name(key) else {
@@ -330,51 +269,10 @@ impl SettingsApp {
                 let binding = self.binding_mut(action);
                 let pad = binding.pad.clone();
                 *binding = binding::binding_from_press(name, mods, pad);
+                self.record_capture_transition(true, binding::CaptureInput::Commit);
                 self.set_keyboard_capture(None);
-                if let Some(transition) =
-                    binding::capture_transition(true, binding::CaptureInput::Commit)
-                {
-                    self.apply_capture_transition(transition);
-                }
                 return;
             }
-        }
-    }
-
-    /// Commit a recorded bind-probe press into the capturing row (Stage 14,
-    /// spec §4.4) — the same semantics as an egui press in
-    /// [`handle_capture_press`]: keyboard fields replace, `pad` stays, capture
-    /// ends, and the transition restores (probes stopped first). The press comes
-    /// from the listener thread, so this runs on the LOGIC pass: the row is
-    /// written even while the settings window is hidden. A press with no keyboard
-    /// capture open is dropped (DEBUG) — the probe only exists while a capture is
-    /// active, so a stray press must never write a row; an unbindable probe key
-    /// is dropped too, so no invalid binding is ever written.
-    pub(crate) fn commit_probe_press(&mut self, press: ProbePress) {
-        let Some(action) = self.capture_press else {
-            tracing::debug!(
-                "Bind probe press dropped: {} is not capturing",
-                key_label(press.code)
-            );
-            return;
-        };
-        let Some(binding) = binding::probe_binding_from_press(self.binding_mut(action), &press)
-        else {
-            tracing::debug!(
-                "Bind probe press dropped: {} has no bindable name",
-                key_label(press.code)
-            );
-            return;
-        };
-        tracing::info!(
-            "Probe bind set for {}: {}",
-            action.label(),
-            binding::binding_label(&binding.key, &binding.mods)
-        );
-        *self.binding_mut(action) = binding;
-        self.set_keyboard_capture(None);
-        if let Some(transition) = binding::capture_transition(true, binding::CaptureInput::Commit) {
-            self.apply_capture_transition(transition);
         }
     }
 
@@ -512,12 +410,13 @@ impl SettingsApp {
                                 response
                             };
                             if response.clicked() {
-                                if let Some(transition) = binding::capture_transition(
+                                // The click moves the capture slot and parks its
+                                // transition; the pad-mailbox mode follows in
+                                // `logic` from the slot delta (spec v3 §4.5).
+                                self.record_capture_transition(
                                     capturing,
                                     binding::CaptureInput::Click,
-                                ) {
-                                    self.apply_capture_transition(transition);
-                                }
+                                );
                                 self.set_keyboard_capture(if capturing {
                                     None
                                 } else {
@@ -583,8 +482,141 @@ impl SettingsApp {
                 }
             });
 
-        if self.controller.is_none() {
+        if !self.controller_available {
             ui.label(rust_i18n::t!("hotkey.unavailable_label"));
+        }
+    }
+}
+
+/// Logic-side capture effects and commit paths: `SettingsApp` owns the hotkey
+/// controller, the pad mailbox and the bind probe, so the pause/restore
+/// transition, the mailbox write and the probe commit run here — `logic` derives
+/// the transition from the slot delta the child paint left behind (spec v3 §4.5).
+impl SettingsApp {
+    /// Keyboard bind-by-press state (Stage 18) plus the pad-capture mailbox:
+    /// while ANY field is capturing, the pad shot path stays silent (Stage 5,
+    /// spec §4.4). Any keyboard capture change — start or end — clears the pad
+    /// capture: one field captures at a time. Used by the logic-side paths
+    /// (probe commit, OK/Cancel cancel) that also need the mailbox write.
+    fn set_keyboard_capture(&mut self, action: Option<Action>) {
+        self.capture_press = action;
+        set_capture_mode(
+            &self.pad_capture,
+            action.map(|action| (CaptureField::Keyboard, action)),
+        );
+        self.capture_pad = None;
+    }
+
+    /// Cancel any active bind capture — keyboard or pad — when the window
+    /// closes via OK/Cancel (§4.4): a keyboard capture had paused the live
+    /// registrations, so they are restored, and the shared pad mailbox returns
+    /// to idle so pad triggers fire again. Nothing is committed to the draft:
+    /// the caller discards it (`cancel_draft`).
+    pub(crate) fn cancel_active_capture(&mut self) {
+        let restoring = binding::capture_transition(
+            self.capture_press.is_some(),
+            binding::CaptureInput::Escape,
+        );
+        // `set_keyboard_capture(None)` clears both fields — the keyboard
+        // capture and the pad capture the mailbox carries.
+        self.set_keyboard_capture(None);
+        if let Some(transition) = restoring {
+            self.apply_capture_transition(transition);
+        }
+    }
+
+    /// Drain the press the pump committed into the draft (§4.4, Stage 5): the
+    /// notation goes to the row that was capturing and capture state ends. The
+    /// notation IS what the field shows and what config holds — the device-info
+    /// label name (`XboxX`) or the raw `unknown:<N>` fallback (§9), so no
+    /// separate per-row hint is kept. The draft is NOT
+    /// published until Apply (§4.4 semantics unchanged) — the pad trigger fires
+    /// the captured bind from then on. Runs in `logic`, so it also works with
+    /// the window hidden.
+    pub(crate) fn drain_pad_capture(&mut self) {
+        let Some(event) = take_captured(&self.pad_capture) else {
+            return;
+        };
+        // The notation is needed on BOTH branches: it goes to the row on a hit
+        // and names the dropped press on a miss, so it is computed before the
+        // decision rather than only inside the success pattern.
+        let notation = pad_notation(event);
+        let Some(target) = binding::pad_capture_target(self.capture_pad.take(), event) else {
+            // The mailbox is the shared truth, so naming it distinguishes a
+            // cancelled pad capture from a keyboard capture that never commits.
+            tracing::warn!(
+                "Pad press ignored: {notation} — no pad field is capturing (mailbox active {:?})",
+                active_capture(&self.pad_capture),
+            );
+            return;
+        };
+        let (action, notation) = target;
+        self.binding_mut(action).pad = Some(notation.clone());
+        tracing::info!("Pad bind set in draft: {} → {notation}", action.label());
+    }
+
+    /// Drive the hotkey pause/restore transition on the controller (Stage 18).
+    /// The controller owns the manager created on the MAIN thread, and `ui`/
+    /// `logic` passes run on that same thread (winit/eframe pump), so this
+    /// satisfies the WM_HOTKEY thread affinity. No controller (host without
+    /// hotkeys) → no-op.
+    ///
+    /// The bind probe (Stage 14) rides the same transition: it is registered
+    /// when a capture opens and unregistered when it ends, so the temporary
+    /// GrabPrinter-style hook — and with it the Snipping Tool block — only ever
+    /// exists while a row is capturing. `Restore` stops the probes BEFORE
+    /// restoring: a bare probe shares its crate id with a bare action binding of
+    /// the same key, so a restore first would collide with our own registration.
+    pub(crate) fn apply_capture_transition(&mut self, transition: binding::CaptureTransition) {
+        let Some(controller) = &mut self.controller else {
+            return;
+        };
+        match transition {
+            binding::CaptureTransition::Pause => {
+                controller.pause();
+                controller.start_bind_probe();
+            }
+            binding::CaptureTransition::Restore => {
+                controller.stop_bind_probe();
+                controller.restore();
+            }
+        }
+    }
+
+    /// Commit a recorded bind-probe press into the capturing row (Stage 14,
+    /// spec §4.4) — the same semantics as an egui press in
+    /// [`handle_capture_press`]: keyboard fields replace, `pad` stays, capture
+    /// ends, and the transition restores (probes stopped first). The press comes
+    /// from the listener thread, so this runs on the LOGIC pass: the row is
+    /// written even while the settings window is hidden. A press with no keyboard
+    /// capture open is dropped (DEBUG) — the probe only exists while a capture is
+    /// active, so a stray press must never write a row; an unbindable probe key
+    /// is dropped too, so no invalid binding is ever written.
+    pub(crate) fn commit_probe_press(&mut self, press: ProbePress) {
+        let Some(action) = self.capture_press else {
+            tracing::debug!(
+                "Bind probe press dropped: {} is not capturing",
+                key_label(press.code)
+            );
+            return;
+        };
+        let Some(binding) = binding::probe_binding_from_press(self.binding_mut(action), &press)
+        else {
+            tracing::debug!(
+                "Bind probe press dropped: {} has no bindable name",
+                key_label(press.code)
+            );
+            return;
+        };
+        tracing::info!(
+            "Probe bind set for {}: {}",
+            action.label(),
+            binding::binding_label(&binding.key, &binding.mods)
+        );
+        *self.binding_mut(action) = binding;
+        self.set_keyboard_capture(None);
+        if let Some(transition) = binding::capture_transition(true, binding::CaptureInput::Commit) {
+            self.apply_capture_transition(transition);
         }
     }
 }

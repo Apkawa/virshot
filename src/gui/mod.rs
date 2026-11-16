@@ -16,12 +16,20 @@
 //! i18n note).
 //!
 //! eframe 0.37 API facts verified in the locked source, not from memory:
-//! - `NativeOptions::viewport` (`ViewportBuilder`): `with_title`,
-//!   `with_inner_size` (720×520 per §4.4), `with_icon(Arc<IconData>)` —
-//!   attached at creation, since Windows captures `ICON_BIG` there (eframe's
-//!   `AppTitleIconSetter`) — plus the dialog chrome of §4.4:
-//!   `with_minimize_button(false)` + `with_maximize_button(false)`. Close and
-//!   resize stay enabled (bordered, resizable window).
+//! - `NativeOptions::viewport` (`ViewportBuilder`): the ROOT viewport is
+//!   INERT — `with_decorations(false)`, 1×1 `with_inner_size`,
+//!   `with_transparent(true)`, `with_visible(false)`, `with_taskbar(false)`
+//!   (`window.rs::root_viewport_builder`): it only hosts the event loop and
+//!   the child viewports, never flashes on screen — eframe reveals the root
+//!   on its first painted frame, and an inert root has nothing to show, not
+//!   even into the taskbar/Alt-Tab list — and never appears there (spec v3
+//!   §4.5). `with_icon(Arc<IconData>)` is attached at creation, since Windows
+//!   captures `ICON_BIG` there (eframe's `AppTitleIconSetter`); children
+//!   inherit the icon. The settings UI lives in the CHILD viewport
+//!   `"virshot-settings"` (`app.rs::settings_child_builder`): 720×520 per
+//!   §4.4 with its own chrome (`about::window_chrome()` — bordered,
+//!   resizable, close enabled, minimize/maximize off); the tabs and the
+//!   bottom bar paint there.
 //! - Widgets: `ComboBox::from_label/from_id_salt(...).selected_text(...).show_ui`,
 //!   `ui.selectable_value`, `ui.checkbox`, `ui.text_edit_singleline`,
 //!   `DragValue::range`, `ui.add_enabled(false, ...)` for disabled rows.
@@ -90,6 +98,12 @@
 //!   notation verbatim, so the field reads back exactly what config will hold;
 //!   no separate label hint exists. On a host without GameInput the field
 //!   renders as a disabled placeholder (Linux gilrs is out of scope).
+//!
+//! Task `2026-11-15_settings-first-start-only` (spec v3 §4.5) splits the tab
+//! paint from the app state: `SettingsUi` (in `app.rs`) is the shared paint
+//! snapshot the settings CHILD viewport draws, and `SettingsAction` is the press
+//! it records for `logic` to perform. The tab modules carry both sides —
+//! `impl SettingsUi` paints, `impl SettingsApp` acts.
 
 mod app;
 pub(crate) mod binding;
@@ -101,5 +115,7 @@ pub(crate) mod overlay;
 mod update;
 mod window;
 
+pub(crate) use app::SettingsAction;
 pub(crate) use app::SettingsApp;
+pub(crate) use app::SettingsUi;
 pub(crate) use window::run;

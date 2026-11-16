@@ -162,14 +162,43 @@ fn probe_pid_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// `tasklist` arguments filtering the process list by pid: `/FI` followed by
+/// `PID eq <pid>`. Pure and OS-independent, so the argument shape is
+/// unit-tested on any host; only the windows probe consumes it in the shipped
+/// binary, and `any(test, windows)` keeps non-windows non-test builds free of
+/// dead code.
+#[cfg(any(test, windows))]
+fn tasklist_args(pid: u32) -> Vec<String> {
+    vec!["/FI".to_owned(), format!("PID eq {pid}")]
+}
+
+/// Win32 `CREATE_NO_WINDOW` process creation flag (0x08000000). Same pure
+/// shape and same gate as [`tasklist_args`].
+#[cfg(any(test, windows))]
+fn create_no_window_flag() -> u32 {
+    0x0800_0000
+}
+
 /// Windows probe: `tasklist` filtered by pid. A missing/failing `tasklist`
 /// leaves liveness *uncertain*, so the existing lock is honoured rather than
 /// stolen (the caller gets `Error::AlreadyRunning`); no panic on either case.
+///
+/// WHY the creation flag: the resident binary declares
+/// `#![windows_subsystem = "windows"]` (main.rs), so this process has no
+/// console; Windows then allocates a console window for the child `tasklist`
+/// (a console-subsystem process), and that allocated window is the flash a
+/// duplicate launch shows before it exits at the guard. `CREATE_NO_WINDOW`
+/// runs the child without allocating one; everything else is unchanged. The
+/// other runtime spawns (`std::env::current_exe()` re-exec in main.rs and
+/// update/install.rs) run the GUI-subsystem binary itself, which never
+/// allocates a console, so they need no flag.
 #[cfg(windows)]
 fn probe_pid_alive(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+
     let Ok(output) = std::process::Command::new("tasklist")
-        .arg("/FI")
-        .arg(format!("PID eq {pid}"))
+        .args(tasklist_args(pid))
+        .creation_flags(create_no_window_flag())
         .output()
     else {
         return true;

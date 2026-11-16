@@ -154,20 +154,25 @@ pub(crate) fn load_or_default(path: &Path) -> Settings {
 
 /// Load like [`load_or_default`] and, when the config file is absent, write
 /// the spec §7 defaults to `path` (spec §7: first run creates the default
-/// config; success logged at INFO).
+/// config; success logged at INFO). Returns the settings plus a `first_run`
+/// flag: `true` means the file did not exist before startup and the default
+/// creation was triggered, `false` means the file already existed (including
+/// a corrupt one, which is deliberately left untouched).
 ///
 /// A corrupt or unreadable config is deliberately *not* rewritten:
 /// [`load_or_default`] logged it as ERROR and returned defaults, and
 /// overwriting would silently destroy a file the user can still fix. If the
 /// creation itself fails (e.g. missing parent dir cannot be created,
 /// permission denied), the failure is logged at WARN and defaults are still
-/// returned — startup must never fail on config.
-pub(crate) fn load_or_create(path: &Path) -> Settings {
+/// returned — startup must never fail on config; the flag still reports the
+/// first-run attempt.
+pub(crate) fn load_or_create(path: &Path) -> (Settings, bool) {
     let settings = load_or_default(path);
-    if !path.exists() {
+    let first_run = !path.exists();
+    if first_run {
         create_default_file(path);
     }
-    settings
+    (settings, first_run)
 }
 
 /// Write the spec §7 defaults to `path`, creating missing parent directories

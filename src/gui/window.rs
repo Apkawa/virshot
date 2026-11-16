@@ -23,8 +23,10 @@ use super::SettingsApp;
 use super::icons::warning_icon_texture;
 
 /// Initial window size per spec §4.4 (~720×520; position/size not persisted).
-const INITIAL_WINDOW_WIDTH: f32 = 720.0;
-const INITIAL_WINDOW_HEIGHT: f32 = 520.0;
+/// The settings CHILD viewport (`gui/app.rs::settings_child_builder`) uses the
+/// same geometry, so the numbers live here once.
+pub(crate) const INITIAL_WINDOW_WIDTH: f32 = 720.0;
+pub(crate) const INITIAL_WINDOW_HEIGHT: f32 = 520.0;
 
 /// GUI failures: window/graphics setup only. Tab logic itself cannot fail —
 /// Apply failures are logged and the app keeps running (spec §5).
@@ -115,6 +117,55 @@ fn app_window_icon() -> Option<Arc<egui::IconData>> {
     }
 }
 
+/// Builder for the ROOT viewport: intentionally INERT — undecorated, 1×1,
+/// transparent, invisible — not merely "hidden" (task
+/// 2026-11-15_settings-first-start-only). eframe 0.37 glow paints the root
+/// window synchronously on `Event::Resumed` and unconditionally shows it on
+/// the first frame (`is_first_frame` → `window.set_visible(true)` in native
+/// `epi_integration.rs` `post_rendering`), so a per-pass
+/// `ViewportCommand::Visible(false)` lands only on the NEXT pass: a merely
+/// hidden decorated window can still flash empty on screen (report: flash,
+/// and flash-then-settings on fresh-config runs). Inertness means there is
+/// nothing to flash: no decorations, 1×1, an empty root `ui` and an alpha-0
+/// clear color (`gui/app.rs::clear_color`). The settings UI lives in the
+/// `virshot-settings` CHILD viewport (`gui/app.rs::settings_child_builder`);
+/// About/update children set their own chrome via `about::window_chrome()`
+/// and overlay chips via their own builder (`crates/overlay/src/host.rs`) —
+/// eframe's deferred-viewport path inherits ONLY the icon and `transparent`
+/// from a parent builder (`glow_integration.rs::initialize_or_update_viewport`),
+/// so children keep their decorations. `.with_transparent(true)` must stay:
+/// eframe derives the alpha-capable GL config from THIS builder and child
+/// viewports inherit `transparent` unless they override it. Harmless caveat:
+/// eframe restores pos/size from saved window settings
+/// (`epi_integration.rs:45` — the `initialize_viewport_builder` call), which
+/// can override the 1×1 `inner_size`
+/// with a previously saved geometry — inertness comes from the missing
+/// decorations and the alpha-0 clear, not from the size.
+pub(crate) fn root_viewport_builder() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(rust_i18n::t!("bottom.window_title"))
+        .with_decorations(false)
+        .with_inner_size([1.0, 1.0])
+        // eframe derives the alpha-capable GL config from the ROOT viewport
+        // builder; the toast/overlay child viewports inherit it and need it.
+        .with_transparent(true)
+        // The ROOT is never shown (spec v3 §4.5, task
+        // 2026-11-15_settings-first-start-only): it exists only to host the
+        // event loop, the toast/overlay child viewports and the About dialog.
+        // First-run and tray-show visibility belong to the settings CHILD
+        // viewport (`gui/app.rs::settings_child_builder` + the visibility
+        // machine in `App::logic`), so the initial visibility here is a constant.
+        .with_visible(false)
+        // eframe reveals the ROOT on its first painted frame despite
+        // `with_visible(false)` (doc comment above), so without this the
+        // one-frame blip would ALSO register the window in the Windows
+        // taskbar and Alt-Tab list: egui-winit maps `taskbar(false)` to
+        // winit `with_skip_taskbar(true)` (egui-winit lib.rs:2448), keeping
+        // even that frame out; no-op on other OSes. Overlay chips use the
+        // same guard (`crates/overlay/src/host.rs:378`).
+        .with_taskbar(false)
+}
+
 /// Open the settings window on the MAIN thread (the hotkey manager lives
 /// there; winit/eframe pumps Win32 messages — Windows WM_HOTKEY affinity;
 /// tray event handling here satisfies the main-thread affinity every backend
@@ -132,6 +183,16 @@ fn app_window_icon() -> Option<Arc<egui::IconData>> {
 /// threads send on. `restart_requested` is the shared install→restart flag:
 /// `App::logic` sets it and closes the viewport when an install succeeds, so
 /// this call returns and `main.rs` restarts the new binary (spec §5).
+/// `open_settings_on_start` is the first-run decision from `main.rs`: `true` on
+/// the first run (the default config was just created) — the settings CHILD
+/// window reveals itself after its first paint; `false` — the process starts
+/// hidden to the tray and the tray left-click or its ShowSettings menu item
+/// shows the child later (spec v3 §4.5). The ROOT window is intentionally
+/// INERT (`root_viewport_builder`: undecorated 1×1 transparent), not merely
+/// hidden — eframe reveals the root window after its first painted frame
+/// regardless of `with_visible(false)`, but an inert window has nothing to
+/// flash; `SettingsApp::new` still gets `startup_hidden = true` so the app
+/// keeps re-sending `Visible(false)` as a safety net.
 /// Returns only if graphics setup failed; the caller falls
 /// back to the idle loop so the process stays resident (spec §5). The toast
 /// stack is owned by the app, so it lives for the whole loop and drops with it.
@@ -149,24 +210,12 @@ pub(crate) fn run(
     update_tx: mpsc::Sender<update::CheckOutcome>,
     update_rx: mpsc::Receiver<update::CheckOutcome>,
     restart_requested: Arc<AtomicBool>,
+    open_settings_on_start: bool,
 ) -> Result<(), Error> {
-    let viewport = egui::ViewportBuilder::default()
-        .with_title(rust_i18n::t!("bottom.window_title"))
-        .with_inner_size([INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT])
-        // eframe derives the alpha-capable GL config from the ROOT viewport
-        // builder; the toast child viewports need it to be transparent.
-        .with_transparent(true)
-        // The settings window is a dialog, not a workspace: no minimize, no
-        // maximize (spec §4.4). The close button and resize stay enabled — the
-        // X button hides to the tray (§4.5), the bottom buttons close for real.
-        // Honesty limit: egui-winit maps these flags onto winit's
-        // `WindowButtons`, and only the Windows backend acts on them
-        // (`winit-0.30.13/platform_impl/windows/window.rs:305-317` →
-        // `WindowFlags::MINIMIZABLE`/`MAXIMIZABLE`); X11/Wayland do not
-        // implement it at all (`winit-0.30.13/window.rs:1045`), so the chrome
-        // is accepted on Windows — not on this Linux host or under Xvfb.
-        .with_minimize_button(false)
-        .with_maximize_button(false);
+    // The ROOT viewport comes from `root_viewport_builder()` — intentionally
+    // inert (undecorated 1×1 transparent invisible), so eframe's
+    // first-frame reveal has nothing to flash on screen.
+    let viewport = root_viewport_builder();
     // The window icon must be attached HERE (creation): Windows captures
     // ICON_BIG at that point (eframe's AppTitleIconSetter). A decode failure
     // is logged and the window opens iconless.
@@ -232,8 +281,19 @@ pub(crate) fn run(
                 update_rx,
                 update_tx,
                 restart_requested,
+                // Safety net against eframe's unconditional first-frame reveal
+                // (task 2026-11-15_settings-first-start-only):
+                // `with_visible(false)` in `root_viewport_builder()` lands only
+                // on the NEXT pass, so the app re-sends `Visible(false)` every
+                // pass for the whole lifetime; inertness itself comes from the
+                // builder (undecorated 1×1 transparent, alpha-0 clear). Under
+                // spec v3 the ROOT is never shown, so this is always `true`.
+                true,
+                // First-run reveal of the settings CHILD window (§4.5): shown once
+                // it has painted, and only when this run created the default config.
+                open_settings_on_start,
             );
-            app.warning_icon = warning_icon_texture(&cc.egui_ctx);
+            app.warning_icon = warning_icon_texture(&cc.egui_ctx).map(Arc::new);
             // Bind-probe wake (Stage 14): the listener thread records a probe
             // press on its own thread, so this context is what makes the logic
             // pass run right away instead of waiting for the tray tick. Attached

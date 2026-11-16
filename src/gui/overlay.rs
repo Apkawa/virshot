@@ -1,9 +1,11 @@
 //! Overlay tab (spec §4.3/§4.4): the test-button gate and its disabled hover
 //! hint, the honest test filename, the chip built from the CURRENT draft with
 //! the real save wording, the corner labels, and the publish path through the
-//! toast hand-off. The `SettingsApp` methods live in this file; `gui/app.rs`
-//! drives them from the `ui` pass. Toast plumbing (`OverlayHost` +
-//! `ToastService`) lives in `gui/app.rs`; the update chips live in `gui/update.rs`.
+//! toast hand-off. The paint side is a `SettingsUi` method driven by the
+//! settings CHILD viewport; the publish side stays a `SettingsApp` method that
+//! `gui/app.rs` calls from `logic` (spec v3 §4.5). Toast plumbing
+//! (`OverlayHost` + `ToastService`) lives in `gui/app.rs`; the update chips
+//! live in `gui/update.rs`.
 
 use std::path::Path;
 
@@ -17,6 +19,7 @@ use crate::config::Overlay;
 use crate::config::OverlayPosition;
 
 use super::SettingsApp;
+use super::SettingsUi;
 
 /// GUI labels for overlay corners (config enum names).
 fn position_label(position: OverlayPosition) -> &'static str {
@@ -82,7 +85,11 @@ fn test_overlay_toast(overlay: &Overlay) -> Toast {
     }
 }
 
-impl SettingsApp {
+/// Paint side of the Overlay tab in the settings CHILD viewport (spec v3 §4.5):
+/// draft edits go to the shared snapshot, and the test chip is parked in
+/// `pending_overlay_test` for `logic` to publish — the toast hand-off is app
+/// state the viewport callback cannot reach.
+impl SettingsUi {
     pub(crate) fn overlay_tab(&mut self, ui: &mut egui::Ui) {
         let overlay = &mut self.draft.overlay;
         // The test chip is published AFTER the tab body: the tab borrows
@@ -145,17 +152,23 @@ impl SettingsApp {
         ui.label(rust_i18n::t!("overlay.all_monitors_hint"));
 
         if let Some(chip) = test_chip {
-            self.publish_overlay_test_chip(chip);
+            // The hand-off is app state, so the child paint parks the chip and
+            // `logic` publishes it on the next pass (spec v3 §4.5).
+            self.pending_overlay_test = Some(chip);
         }
     }
+}
 
+/// Logic side: the chip the child paint parked is handed to the toast service
+/// here, next to the real-save hand-off it shares.
+impl SettingsApp {
     /// Publish the Overlay tab's test chip through the SAME hand-off slot
     /// real saves use (spec §4.3): the handle never blocks, and the chip
     /// spawns on the next `overlay_host.update` pass in `logic`. No capture,
     /// no save, no config write, no hotkey re-registration — only the chip
     /// and one INFO line. A missing handle (no toast service) or a closed
     /// channel is WARNed, never fatal (spec §5).
-    fn publish_overlay_test_chip(&self, chip: Toast) {
+    pub(crate) fn publish_overlay_test_chip(&self, chip: Toast) {
         let Some(handle) = capture::handoff_handle(&self.handoff) else {
             tracing::warn!("Overlay test chip skipped: no toast handle attached");
             return;

@@ -4,8 +4,9 @@
 //! the update-interval dropdown's selected text, and the update row the tab
 //! paints — plus the Windows-only autostart row at the bottom of the tab
 //! (task `2026-11-13_autostart`) and its disabled non-Windows placeholder —
-//! plus the `SettingsApp` methods that paint the tab and open the
-//! picker. Extracted from `gui/mod.rs` (GUI refactor); the save-gate
+//! plus the tab's paint method (`SettingsUi::general_tab`, settings CHILD
+//! viewport, spec v3 §4.5) and the logic-side Browse picker
+//! (`SettingsApp::browse_save_path`). Extracted from `gui/mod.rs` (GUI refactor); the save-gate
 //! tooltips, `Tab`, the bottom bar, and the hotkeys / overlay wiring live in
 //! `gui/app.rs`, the corner label (`position_label`) in `gui/overlay.rs`, as do
 //! the update-state fields and the check/install pump — the update decisions
@@ -19,7 +20,9 @@ use crate::config::Format;
 use crate::config::Settings;
 use crate::template::TOKENS;
 
+use super::SettingsAction;
 use super::SettingsApp;
+use super::SettingsUi;
 use super::icons;
 use super::update::ForcedCheckStatus;
 use super::update::check_now_button_enabled;
@@ -163,7 +166,11 @@ fn autostart_placeholder_label() -> String {
     rust_i18n::t!("general.autostart_windows_only_note").into_owned()
 }
 
-impl SettingsApp {
+/// Paint side of the General tab in the settings CHILD viewport (spec v3 §4.5):
+/// draft edits go to the shared snapshot, and presses whose effect needs app
+/// state (the blocking picker, the update check, the update dialog) are recorded
+/// as `SettingsAction`s for `logic` to perform on the next pass.
+impl SettingsUi {
     pub(crate) fn general_tab(&mut self, ui: &mut egui::Ui) {
         // Language dropdown (spec §2 live locale switch, Stage 2b): FIRST row
         // of the tab. The draft stores the canonical config code (Apply
@@ -194,7 +201,10 @@ impl SettingsApp {
             browse_clicked = ui.button(rust_i18n::t!("general.browse_button")).clicked();
         });
         if browse_clicked {
-            self.browse_save_path();
+            // The picker blocks and writes the authoritative draft, so the child
+            // paint only records the press; `logic` runs `browse_save_path`
+            // (spec v3 §4.5).
+            self.actions.push(SettingsAction::Browse);
         }
 
         let general = &mut self.draft.general;
@@ -292,7 +302,7 @@ impl SettingsApp {
                 )
                 .clicked()
             {
-                self.check_now_requested = true;
+                self.actions.push(SettingsAction::CheckNow);
             }
             if let Some(status) = forced_check_status_shown(
                 self.forced_check_status.as_ref(),
@@ -385,7 +395,9 @@ impl SettingsApp {
                 }
             });
             if open_dialog {
-                self.open_update_dialog();
+                // The dialog is a CHILD viewport owned by the app, so the press
+                // is recorded and `logic` opens it (spec v3 §4.5).
+                self.actions.push(SettingsAction::OpenUpdateDialog);
             }
         }
 
@@ -421,7 +433,12 @@ impl SettingsApp {
             );
         }
     }
+}
 
+/// Logic side: the Browse press recorded by the child paint is executed here,
+/// because the picker blocks and the picked path must land in the authoritative
+/// draft (spec v3 §4.5).
+impl SettingsApp {
     /// Browse → native folder picker (spec §4.4, `rfd` approved by the user
     /// 2026-11-03). API facts verified in the locked rfd 0.17.2 source, not
     /// from memory: the BLOCKING `rfd::FileDialog` builder —
