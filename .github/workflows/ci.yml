@@ -36,6 +36,11 @@ jobs:
           sudo apt-get install -y \
             pkg-config libegl1-mesa-dev libgbm-dev libudev-dev \
             libwayland-dev libpipewire-0.3-dev libclang-dev
+      # Кеш сборки: артефакты зависимостей; сохраняем только на push в master, PR и nightly только читают кеш
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Check workspace
@@ -50,6 +55,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # Кеш сборки: артефакты зависимостей; сохраняем только на push в master, PR и nightly только читают кеш
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Run workspace tests
         run: cargo test --workspace -- --skip 'cli_headless::'
       - name: Clippy
@@ -87,6 +97,11 @@ jobs:
             libwayland-dev libpipewire-0.3-dev libclang-dev
       - name: Add build target
         run: rustup target add ${{ matrix.target }}
+      # Кеш сборки: артефакты зависимостей; toolchain уже выбран (rustc в ключе); сохраняем только на push в master, PR и nightly только читают кеш
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
       - name: Upload binary artifact
@@ -135,16 +150,24 @@ jobs:
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Install git-cliff
-        run: cargo install git-cliff --version 2.14.2 --no-default-features
+      # Скачиваем готовый бинарник git-cliff (pin 2.14.2) вместо cargo install —
+      # сборка из исходников занимает десятки минут. Целостность проверяем по
+      # .sha512 из того же релиза (строка совместима с sha512sum -c), затем
+      # распаковываем tar.gz -> каталог git-cliff-2.14.2/ с бинарником внутри.
+      - name: Download git-cliff
+        run: |
+          wget -q "https://github.com/orhun/git-cliff/releases/download/v2.14.2/git-cliff-2.14.2-x86_64-unknown-linux-gnu.tar.gz"
+          wget -q "https://github.com/orhun/git-cliff/releases/download/v2.14.2/git-cliff-2.14.2-x86_64-unknown-linux-gnu.tar.gz.sha512"
+          sha512sum -c git-cliff-2.14.2-x86_64-unknown-linux-gnu.tar.gz.sha512
+          tar -xzf git-cliff-2.14.2-x86_64-unknown-linux-gnu.tar.gz
 
       - name: Generate release notes
         run: |
           mkdir -p dist
           if [ "${{ steps.kind.outputs.kind }}" = "release" ]; then
-            git-cliff --latest -o dist/notes.md
+            ./git-cliff-2.14.2/git-cliff --latest -o dist/notes.md
           else
-            git-cliff --unreleased -o dist/notes.md
+            ./git-cliff-2.14.2/git-cliff --unreleased -o dist/notes.md
           fi
 
       - name: Package archives
